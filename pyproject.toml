@@ -25,3 +25,9 @@ include = ["langgraph_crew_knowledge_base*"]
 [tool.black]
 line-length = 88
 target-version = ['py39']
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "plugin_knowledge-base: knowledge-base plugin tests",
+]

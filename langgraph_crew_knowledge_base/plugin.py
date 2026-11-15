@@ -33,7 +33,7 @@ class KnowledgeBasePlugin(Plugin):
         ctx.register_provider("knowledge_base", provider)
         
         # Register the node provider for the executor loop
-        ctx.register_provider("knowledge_discovery", provider)
+        ctx.register_provider("knowledge_discovery_node", provider)
         
         # Register tools
         tools = provider.get_tools()

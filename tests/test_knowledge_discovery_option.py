@@ -119,3 +119,72 @@ class TestKnowledgeDiscoveryLabels:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+class TestKnowledgeDiscoveryNode:
+    """The node itself must run and hand control back to the executor.
+
+    These build a real ``NodeAgent`` (LLM factory + middleware), so they are
+    slower than the pure wiring tests above and get their own timeout.
+    """
+
+    pytestmark = [
+        pytest.mark.slow(reason="builds a real NodeAgent (LLM factory + middleware)", expiry="2027-06-30"),
+        pytest.mark.timeout(180),
+    ]
+
+    @pytest.fixture(autouse=True)
+    def _fresh_node_cache(self):
+        """Drop the module-level node cache so every test builds its own agent.
+
+        The cache is a process-wide dict keyed by node name. Another test that
+        ran earlier can leave an instance bound to a different LLM profile, and
+        the agent then fails or hangs instead of skipping.
+        """
+        from langgraph_crew_knowledge_base import node as kb_node
+
+        kb_node._node_cache.clear()
+        yield
+        kb_node._node_cache.clear()
+
+    def _state(self):
+        return {
+            "messages": [],
+            "current_task": "hi",
+            "knowledge_discovery_enabled": True,
+            "knowledge_discovery_completed_for_tasks": [],
+            "task_queue": [
+                {
+                    "id": "task_1",
+                    "description": "hi",
+                    "requires_knowledge_discovery": True,
+                    "assigned_titles": ["meadows-2008"],
+                }
+            ],
+            "current_plan": [],
+        }
+
+    def test_node_returns_to_executor_and_marks_completion(self):
+        """goto=executor, task marked done, findings keep the assigned titles."""
+        import asyncio
+
+        pytest.importorskip("app.core.core_node", reason="core not importable")
+        from langgraph_crew_knowledge_base import node as kb_node
+
+        cmd = asyncio.run(kb_node.knowledge_discovery_node(self._state()))
+        assert cmd.goto == "executor"
+        assert "hi" in cmd.update["knowledge_discovery_completed_for_tasks"]
+        findings = cmd.update["knowledge_discovery_findings"]
+        assert findings["assigned_titles"] == ["meadows-2008"]
+
+    def test_node_skips_when_not_enabled(self):
+        """Without the flag the node still exits to the executor."""
+        import asyncio
+
+        pytest.importorskip("app.core.core_node", reason="core not importable")
+        from langgraph_crew_knowledge_base import node as kb_node
+
+        state = self._state()
+        state["knowledge_discovery_enabled"] = False
+        state["task_queue"][0]["requires_knowledge_discovery"] = False
+        cmd = asyncio.run(kb_node.knowledge_discovery_node(state))
+        assert cmd.goto == "executor"
