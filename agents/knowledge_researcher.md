@@ -16,9 +16,8 @@ x-penta:
     native:
       - knowledge_base___search
       - knowledge_base___recommend_titles
-    external:
-      - websearch (brave/searxng)
-      - url-reader
+      - brave_web_search
+      - searxng_web_search
   memory:
     cross_enabled: false
 ---
