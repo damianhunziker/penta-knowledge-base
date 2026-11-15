@@ -1,0 +1,45 @@
+#
+# Knowledge discovery — the discovery flow the `knowledge_discovery` graph node runs.
+#
+# Shape (the agents are YAML manifests in ../agents/, this file only wires them):
+#
+#   1. existing_corpus → agents/knowledge_scout.md
+#                         "what is already in the corpus, and what of it should the
+#                         worker use?" — read-only, chunks nothing.
+#   2. new_titles      → agents/knowledge_researcher.md
+#                         Researches new PDFs with correct licenses that fit
+#                         the task thematically.
+#   3. curate          → agents/knowledge_curator.md
+#                         Decides what to chunk, assigns titles to agents,
+#                         triggers background chunking.
+#   4. handoff         → one message for the worker: the existing titles
+#                         from step 1, new candidates from step 2, and
+#                         chunking decisions from step 3.
+#
+spec_version: 1
+kind: workflow
+metadata:
+  id: knowledge-discovery
+  version: 1.0.0
+  description: >-
+    Discover relevant knowledge: search existing corpus, research new titles,
+    recommend what to use, optionally trigger background chunking.
+x-penta:
+  callable: true
+  tool_discovery: false
+spec:
+  state: builtin.crew_state
+  entry: existing_corpus
+  nodes:
+    - id: existing_corpus
+      use: agent:knowledge_scout
+      next: [new_titles, handoff]
+    - id: new_titles
+      use: agent:knowledge_researcher
+      next: [curate]
+    - id: curate
+      use: agent:knowledge_curator
+      next: [handoff]
+    - id: handoff
+      use: plugin:knowledge-base.flow
+      next: [__end__]

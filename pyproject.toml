@@ -1,0 +1,27 @@
+[project]
+name = "penta-knowledge-base"
+version = "0.1.0"
+description = "Knowledge base plugin for LangGraph Crew / PENTA: book corpus, hierarchical chunking, BGE-M3 embeddings, reasoning-driven injection, single-invitation rendering, MCP tools, knowledge discovery node."
+requires-python = ">=3.9"
+dependencies = [
+    "langchain-core>=0.1.0",
+    "pydantic>=2.0.0",
+    "qdrant-client>=1.7.0",
+]
+
+[project.entry-points."langgraph_crew.plugins"]
+knowledge_base = "langgraph_crew_knowledge_base.plugin:plugin"
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["langgraph_crew_knowledge_base*"]
+
+[tool.setuptools.package-data]
+"langgraph_crew_knowledge_base" = ["../workflows/*.yaml", "../agents/*.md"]
+
+[tool.black]
+line-length = 88
+target-version = ['py39']

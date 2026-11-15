@@ -1,0 +1,299 @@
+#!/usr/bin/env python3
+"""
+Knowledge Discovery Node - NodeAgent Implementation.
+
+This node discovers relevant knowledge for task execution:
+1. Searches existing corpus for relevant titles
+2. Researches new PDFs with correct licenses
+3. Recommends titles to the worker
+4. Optionally triggers background chunking
+5. Assigns titles to agents
+
+Similar to tool_discovery_node, it runs:
+- Pre-execution: Before worker agents start
+- Runtime: When agent recognizes need for reference material
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+
+from langchain_core.messages import AIMessage
+from langgraph.errors import GraphBubbleUp
+from langgraph.types import Command
+
+from app.core.core_node import NodeAgent
+from app.core.enhanced_state import EnhancedCrewState
+
+logger = logging.getLogger(__name__)
+
+
+class KnowledgeDiscoveryNode(NodeAgent):
+    """
+    Knowledge Discovery Node - discovers relevant knowledge.
+    
+    This node:
+    1. Analyzes the current task
+    2. Determines if knowledge discovery is needed
+    3. Searches existing corpus
+    4. Researches new titles (with license check)
+    5. Triggers chunking if approved
+    6. Assigns titles to agents
+    7. Returns findings for the worker
+    
+    Inherits from NodeAgent for:
+    - ReactAgentWrapper with tool calling
+    - Streaming support
+    - Checkpoint/resume integration
+    """
+    
+    # Node-specific color and icon
+    color = "#9C27B0"
+    icon = "📚 KNOWLEDGE DISCOVERY"
+    llm_role = "knowledge_researcher"
+    
+    def __init__(self, verbose: bool = False):
+        """Initialize KnowledgeDiscoveryNode.
+        
+        Args:
+            verbose: Enable verbose logging
+        """
+        super().__init__(node_name="knowledge_discovery", verbose=verbose)
+    
+    async def execute(self, state: EnhancedCrewState) -> Command:
+        """Execute knowledge discovery for the current task.
+        
+        This node:
+        1. Checks if knowledge discovery is enabled in state
+        2. Analyzes what knowledge is needed
+        3. Runs discovery workflow
+        4. Returns to executor
+        
+        Args:
+            state: Current workflow state
+            
+        Returns:
+            Command: Next node to go to (executor or worker)
+        """
+        if self.verbose:
+            print("📚 [KNOWLEDGE_DISCOVERY_NODE] start")
+        
+        # ====================================================================
+        # DISABLE_KNOWLEDGE_DISCOVERY: Skip knowledge discovery entirely
+        # ====================================================================
+        disable_knowledge_discovery = os.getenv(
+            "DISABLE_KNOWLEDGE_DISCOVERY", "false"
+        ).lower() in ("true", "1", "yes")
+        
+        if disable_knowledge_discovery:
+            if self.verbose:
+                print("📚 [KNOWLEDGE_DISCOVERY_NODE] skipped (DISABLE_KNOWLEDGE_DISCOVERY=true)")
+            current_task = self._get_current_task(state)
+            completed_for_tasks = set(state.get("knowledge_discovery_completed_for_tasks", []))
+            completed_for_tasks.add(current_task)
+            return Command(
+                goto="executor",
+                update={
+                    "messages": state.get("messages", []),
+                    "knowledge_discovery_completed_for_tasks": list(completed_for_tasks),
+                    "current_task": None,
+                }
+            )
+        
+        # Check if knowledge discovery is enabled
+        knowledge_discovery_enabled = state.get("knowledge_discovery_enabled", False)
+        
+        # Get current task for completion tracking
+        current_task = self._get_current_task(state)
+        
+        # Check if already completed for this task
+        kd_completed = state.get("knowledge_discovery_completed_for_tasks", [])
+        completed_set = set(kd_completed) if kd_completed else set()
+        
+        if current_task in completed_set:
+            if self.verbose:
+                print("📚 [KNOWLEDGE_DISCOVERY_NODE] skipped (already completed for this task)")
+            return Command(
+                goto="executor",
+                update={
+                    "messages": state.get("messages", []),
+                    "knowledge_discovery_completed_for_tasks": list(completed_set),
+                    "current_task": None,
+                }
+            )
+        
+        # Check task definition for requires_knowledge_discovery
+        if not knowledge_discovery_enabled:
+            current_plan = state.get("current_plan", [])
+            for task in current_plan:
+                if task.get("requires_knowledge_discovery", False):
+                    knowledge_discovery_enabled = True
+                    state["knowledge_discovery_enabled"] = True
+                    if self.verbose:
+                        print(f"📚 Knowledge discovery enabled from current_plan: {task.get('id')}")
+                    break
+            
+            if not knowledge_discovery_enabled:
+                task_queue = state.get("task_queue", [])
+                for task in task_queue:
+                    if task.get("requires_knowledge_discovery", False):
+                        knowledge_discovery_enabled = True
+                        state["knowledge_discovery_enabled"] = True
+                        if self.verbose:
+                            print(f"📚 Knowledge discovery enabled from task_queue: {task.get('id')}")
+                        break
+        
+        if not knowledge_discovery_enabled:
+            if self.verbose:
+                print("📚 [KNOWLEDGE_DISCOVERY_NODE] skipped (not enabled for this task)")
+            
+            completed_for_tasks = set(state.get("knowledge_discovery_completed_for_tasks", []))
+            completed_for_tasks.add(current_task)
+            
+            return Command(
+                goto="executor",
+                update={
+                    "messages": state.get("messages", []) + [
+                        AIMessage(content="Knowledge discovery skipped - not enabled for this task")
+                    ],
+                    "knowledge_discovery_completed_for_tasks": list(completed_for_tasks),
+                    "current_task": None,
+                }
+            )
+        
+        if self.verbose:
+            print("📚 [KNOWLEDGE_DISCOVERY_NODE] running discovery")
+        
+        # Run the discovery workflow
+        try:
+            command = await self._run_discovery_workflow(state)
+        except GraphBubbleUp:
+            raise
+        except Exception as e:
+            logger.exception("[KNOWLEDGE_DISCOVERY] knowledge discovery failed")
+            
+            completed = set(state.get("knowledge_discovery_completed_for_tasks", []) or [])
+            completed.add(current_task)
+            
+            return Command(
+                goto="executor",
+                update={
+                    "messages": state.get("messages", []) + [
+                        AIMessage(
+                            content=f"Knowledge discovery failed: {type(e).__name__}: {e}. "
+                                   "Continuing without additional knowledge."
+                        )
+                    ],
+                    "knowledge_discovery_completed_for_tasks": list(completed),
+                    "current_task": None,
+                },
+            )
+        
+        updates = dict(command.update or {})
+        updates.setdefault("current_task", None)
+        
+        # Mark as completed
+        completed = set(state.get("knowledge_discovery_completed_for_tasks", []) or [])
+        completed.add(current_task)
+        updates["knowledge_discovery_completed_for_tasks"] = list(completed)
+        
+        return Command(goto=command.goto or "executor", update=updates)
+    
+    async def _run_discovery_workflow(self, state: EnhancedCrewState) -> Command:
+        """Run the knowledge discovery workflow.
+        
+        This delegates to the workflow defined in workflows/knowledge-discovery.yaml.
+        """
+        # TODO: Implement actual workflow execution via runtime___start_workflow
+        # For now, return a simple result
+        
+        current_task = self._get_current_task(state)
+        
+        # Get any pre-assigned titles from the task
+        assigned_titles = []
+        assigned_categories = []
+        
+        task_queue = state.get("task_queue", [])
+        for task in task_queue:
+            if task.get("id") == current_task or task.get("description") == current_task:
+                assigned_titles = task.get("assigned_titles", [])
+                assigned_categories = task.get("assigned_categories", [])
+                break
+        
+        # Build the discovery findings
+        findings = {
+            "step": "knowledge_discovery",
+            "task": current_task,
+            "assigned_titles": assigned_titles,
+            "assigned_categories": assigned_categories,
+            "recommendations": [],
+            "chunking_jobs": [],
+            "message": "Knowledge discovery completed. Check knowledge_discovery_findings for details.",
+        }
+        
+        return Command(
+            goto="executor",
+            update={
+                "knowledge_discovery_findings": findings,
+                "messages": state.get("messages", []) + [
+                    AIMessage(content=f"Knowledge discovery completed. Found {len(assigned_titles)} pre-assigned titles.")
+                ],
+            }
+        )
+    
+    def _get_current_task(self, state: EnhancedCrewState) -> str:
+        """Extract current task from state."""
+        current_task_from_state = state.get("current_task")
+        
+        if current_task_from_state:
+            return current_task_from_state
+        
+        task_queue = state.get("task_queue", [])
+        if task_queue:
+            for task in task_queue:
+                if task.get("requires_knowledge_discovery", False):
+                    return task.get("description", task.get("id", "Unknown task"))
+            return task_queue[0].get("description", "Unknown task")
+        
+        current_plan = state.get("current_plan", [])
+        if current_plan:
+            return current_plan[0].get("description", "Unknown task")
+        
+        return "General task"
+    
+    async def _execute_node_logic(self, state: EnhancedCrewState) -> Command:
+        """Execute knowledge discovery logic (called by base execute())."""
+        return await self.execute(state)
+
+
+# Export for node factory
+NODE_CLASS = KnowledgeDiscoveryNode
+
+
+# Cache for node instances
+_node_cache = {}
+
+
+async def knowledge_discovery_node(state: EnhancedCrewState) -> Command:
+    """Backward compatibility wrapper for knowledge_discovery_node function.
+    
+    Args:
+        state: Current workflow state
+        
+    Returns:
+        Command: Next node to go to
+    """
+    global _node_cache
+    node_name = "knowledge_discovery"
+    
+    if node_name not in _node_cache:
+        from app.core.global_state import get_verbose
+        verbose = get_verbose()
+        _node_cache[node_name] = KnowledgeDiscoveryNode(verbose=verbose)
+        success = await _node_cache[node_name].initialize()
+        if not success:
+            del _node_cache[node_name]
+            raise RuntimeError(f"Failed to initialize {node_name} node")
+    
+    return await _node_cache[node_name].execute(state)
