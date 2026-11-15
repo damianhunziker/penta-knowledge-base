@@ -1,47 +1,12 @@
-# Knowledge Base Plugin
+# Knowledge Base plugin — instructions
 
-Load skill: `skills___skill_loader(skill_name="knowledge-base")`
+This plugin owns the knowledge corpus (books, academic literature). Its rules apply while it is active.
 
-## Rules
-
-- **One invitation per chunk.** Read response offers broader resolutions.
-- **License-first.** Never chunk without verified license (CC-BY, MIT, purchased).
-- **Background chunking.** Large documents chunk asynchronously.
-- **Assignments are training memory.** Agents get assigned titles at run start.
-- **Planner decides discovery.** `requires_knowledge_discovery: true/false` is a planner decision.
-
-## Tools
-
-| Tool | Purpose |
-|------|---------|
-| `search` | Query corpus |
-| `read` | Get content by kb_ref |
-| `list` | Browse books |
-| `recommend_titles` | Suggestions by topic |
-| `discover_files` | Find files in vault |
-| `ingest_from_root` | Add MD/PDF from vault |
-| `assign_to_agent` | Give agent titles |
-
-## kb_ref
-
-```
-knowledge_base:corpus/book/chapter#s:section
-```
-
-## Ingestion
-
-From vault roots:
-```
-knowledge_base___ingest_from_root("project-vault:Knowledge/book.md", "academic")
-```
-
-Markdown frontmatter: `title`, `authors`, `tier`, `categories`, `tags`
-
-## Assignment
-
-```yaml
-x-penta:
-  knowledge_base:
-    titles: ["meadows-2008"]
-    categories: ["systems-thinking"]
-```
+- **The corpus is the source of truth.** Titles, chunks, and references live in Qdrant + SQLite — not in markdown files.
+- **Load the `knowledge-base` skill before the first knowledge action** in a session (`skills___skill_loader(skill_name="knowledge-base")`). It has the tool map, kb_ref grammar, and ingestion workflow.
+- **One invitation per chunk.** Every rendered chunk ends with one `↳ read section` line. The read response offers broader resolutions.
+- **License-first for chunking.** Never chunk a document without verifying the license (CC-BY, CC-BY-SA, MIT, public domain, or purchased). Unknown license = ask the user.
+- **Background chunking.** `chunk_document` with `background=True` is the default; large documents are never chunked synchronously.
+- **Assignments are training memory.** When a title is assigned to an agent, the agent receives it at run start and can read deeper on demand.
+- **The planner decides discovery.** `requires_knowledge_discovery: true/false` is a planner decision. The planner also suggests `assigned_titles`.
+- Ingest from vault roots: `knowledge_base___ingest_from_root("project-vault:Knowledge/book.md", corpus)`. Markdown frontmatter provides metadata.
