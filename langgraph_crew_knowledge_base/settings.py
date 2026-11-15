@@ -1,12 +1,18 @@
 #!/usr/bin/env python3
 """Environment-driven settings for the knowledge base plugin.
 
-All values come from the process environment, so an operator can tune the
-behaviour without touching code. Every setting has a documented default and a
-safe fallback: a malformed value never breaks a run, it just falls back.
+The plugin owns its own configuration file, exactly like the web-discovery
+plugin owns ``plugin.env``:
 
-Environment variables
----------------------
+    plugins/knowledge-base/plugin.env.example   (versioned template)
+    plugins/knowledge-base/plugin.env           (local override, gitignored)
+
+Precedence: **process environment > plugin.env > plugin.env.example > default**.
+A malformed value logs a warning and falls back to the default — a typo in the
+config file must never break a run.
+
+Settings
+--------
 
 ``KNOWLEDGE_INJECT_AFTER_TOOLS``
     Inject the next knowledge block after this many tool calls. Default ``13``.
@@ -14,7 +20,7 @@ Environment variables
     start still happens).
 
 ``KNOWLEDGE_INJECT_CHUNKS``
-    How many chunks one injection carries. Default ``3``.
+    How many chunks one mid-run injection carries. Default ``3``.
 
 ``KNOWLEDGE_TASK_CHUNKS``
     How many chunks are injected when a task starts (cold injection).
@@ -39,8 +45,20 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Dict
 
 logger = logging.getLogger(__name__)
+
+#: ``<plugin>/plugin.env`` lives two levels above this module.
+PLUGIN_DIR = Path(__file__).resolve().parent.parent
+
+#: Versioned template (always present, holds the documented defaults).
+ENV_EXAMPLE = PLUGIN_DIR / "plugin.env.example"
+
+#: Local override, gitignored.
+ENV_FILE = PLUGIN_DIR / "plugin.env"
+
 
 #: Defaults are part of the contract — the docs and the tests pin them.
 DEFAULT_INJECT_AFTER_TOOLS = 13
@@ -51,14 +69,53 @@ DEFAULT_MIN_SCORE = 0.35
 DEFAULT_BUDGET_TOKENS = 900
 
 
-def _int_env(name: str, default: int, *, minimum: int = 0) -> int:
-    """Read an int from the environment, falling back on anything unusable.
+def _parse_env_file(path: Path) -> Dict[str, str]:
+    """Parse a ``.env``-style file (no interpolation, no exec)."""
+    values: Dict[str, str] = {}
+    try:
+        if not path.exists():
+            return values
+        for raw_line in path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("export "):
+                line = line[len("export "):].strip()
+            if "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            if key:
+                values[key] = value
+    except OSError as exc:  # noqa: BLE001 - config must never break a run
+        logger.warning("[KNOWLEDGE_BASE] could not read %s: %s", path, exc)
+    return values
 
-    A typo in ``.env`` must never break a run, so a non-numeric value logs a
-    warning and yields the default.
+
+def _file_values() -> Dict[str, str]:
+    """Merged values from the two plugin files (example first, local wins)."""
+    merged = _parse_env_file(ENV_EXAMPLE)
+    merged.update(_parse_env_file(ENV_FILE))
+    return merged
+
+
+def _raw(name: str, default: str = "") -> str:
+    """Resolve one value: process env > plugin.env > plugin.env.example."""
+    env_value = os.environ.get(name)
+    if env_value is not None and str(env_value).strip():
+        return str(env_value).strip()
+    return _file_values().get(name, default)
+
+
+def _int(name: str, default: int) -> int:
+    """Read an int, falling back on anything unusable.
+
+    A typo in ``plugin.env`` must never break a run, so a non-numeric value
+    logs a warning and yields the default.
     """
-    raw = os.getenv(name)
-    if raw is None or str(raw).strip() == "":
+    raw = _raw(name)
+    if raw == "":
         return default
     try:
         value = int(str(raw).strip())
@@ -67,17 +124,17 @@ def _int_env(name: str, default: int, *, minimum: int = 0) -> int:
             "[KNOWLEDGE_BASE] %s=%r is not an integer, using %s", name, raw, default
         )
         return default
-    if value < minimum:
+    if value < 0:
         logger.warning(
-            "[KNOWLEDGE_BASE] %s=%s is below %s, using %s", name, value, minimum, default
+            "[KNOWLEDGE_BASE] %s=%s is negative, using %s", name, value, default
         )
         return default
     return value
 
 
-def _float_env(name: str, default: float, *, minimum: float = 0.0) -> float:
-    raw = os.getenv(name)
-    if raw is None or str(raw).strip() == "":
+def _float(name: str, default: float) -> float:
+    raw = _raw(name)
+    if raw == "":
         return default
     try:
         value = float(str(raw).strip())
@@ -86,14 +143,14 @@ def _float_env(name: str, default: float, *, minimum: float = 0.0) -> float:
             "[KNOWLEDGE_BASE] %s=%r is not a number, using %s", name, raw, default
         )
         return default
-    if value < minimum:
+    if value < 0:
         return default
     return value
 
 
-def _bool_env(name: str, default: bool = False) -> bool:
-    raw = os.getenv(name)
-    if raw is None:
+def _bool(name: str, default: bool = False) -> bool:
+    raw = _raw(name)
+    if raw == "":
         return default
     return str(raw).strip().lower() in ("true", "1", "yes", "on")
 
@@ -117,19 +174,19 @@ class KnowledgeSettings:
 
 
 def load_settings() -> KnowledgeSettings:
-    """Read the settings from the environment (callers cache nothing)."""
+    """Read the settings (process env > plugin.env > example > default)."""
     return KnowledgeSettings(
-        inject_after_tools=_int_env(
+        inject_after_tools=_int(
             "KNOWLEDGE_INJECT_AFTER_TOOLS", DEFAULT_INJECT_AFTER_TOOLS
         ),
-        inject_chunks=_int_env("KNOWLEDGE_INJECT_CHUNKS", DEFAULT_INJECT_CHUNKS),
-        task_chunks=_int_env("KNOWLEDGE_TASK_CHUNKS", DEFAULT_TASK_CHUNKS),
-        max_per_run=_int_env("KNOWLEDGE_INJECT_MAX_PER_RUN", DEFAULT_MAX_PER_RUN),
-        min_score=_float_env("KNOWLEDGE_INJECT_MIN_SCORE", DEFAULT_MIN_SCORE),
-        budget_tokens=_int_env(
+        inject_chunks=_int("KNOWLEDGE_INJECT_CHUNKS", DEFAULT_INJECT_CHUNKS),
+        task_chunks=_int("KNOWLEDGE_TASK_CHUNKS", DEFAULT_TASK_CHUNKS),
+        max_per_run=_int("KNOWLEDGE_INJECT_MAX_PER_RUN", DEFAULT_MAX_PER_RUN),
+        min_score=_float("KNOWLEDGE_INJECT_MIN_SCORE", DEFAULT_MIN_SCORE),
+        budget_tokens=_int(
             "KNOWLEDGE_INJECT_BUDGET_TOKENS", DEFAULT_BUDGET_TOKENS
         ),
-        disabled=_bool_env("DISABLE_KNOWLEDGE_DISCOVERY", False),
+        disabled=_bool("DISABLE_KNOWLEDGE_DISCOVERY", False),
     )
 
 
@@ -137,7 +194,7 @@ def chunks_for_task(task: object, settings: KnowledgeSettings | None = None) -> 
     """How many chunks to inject when ``task`` starts.
 
     Priority: the task's own ``knowledge_chunks`` → ``KNOWLEDGE_TASK_CHUNKS``.
-    A task value is clamped to the same minimum (0 means "none for this task").
+    A task value of ``0`` means "no literature for this task".
     """
     settings = settings or load_settings()
     default = settings.task_chunks
@@ -160,7 +217,10 @@ __all__ = [
     "DEFAULT_MAX_PER_RUN",
     "DEFAULT_MIN_SCORE",
     "DEFAULT_TASK_CHUNKS",
+    "ENV_EXAMPLE",
+    "ENV_FILE",
     "KnowledgeSettings",
+    "PLUGIN_DIR",
     "chunks_for_task",
     "load_settings",
 ]

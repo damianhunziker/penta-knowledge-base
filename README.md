@@ -119,9 +119,16 @@ The planner can set per-task:
 - `assigned_categories: ["systems-thinking"]`
 - `knowledge_chunks: 5` — how many chunks this task gets at start
 
-## Injection (environment-driven)
+## Injection (plugin-owned configuration)
 
-Two moments inject knowledge. Both are tuned in `.env`; nothing is hardcoded.
+Two moments inject knowledge. Both are tuned in the plugin's own
+`plugin.env` — copy `plugin.env.example` and edit it:
+
+```bash
+cp plugins/knowledge-base/plugin.env.example plugins/knowledge-base/plugin.env
+```
+
+Precedence: **process environment > `plugin.env` > `plugin.env.example` > default**.
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -132,6 +139,8 @@ Two moments inject knowledge. Both are tuned in `.env`; nothing is hardcoded.
 | `KNOWLEDGE_INJECT_MIN_SCORE` | `0.35` | Retrieval score below which a chunk is dropped. |
 | `KNOWLEDGE_INJECT_BUDGET_TOKENS` | `900` | Token ceiling for one block. |
 | `DISABLE_KNOWLEDGE_DISCOVERY` | `false` | Switch knowledge discovery off entirely. |
+
+A per-task `knowledge_chunks` overrides `KNOWLEDGE_TASK_CHUNKS` for that task.
 
 **Mid-run** (`pre_model` hook, `injection.py`): runs before every LLM call, so
 it counts completed tool turns. After `KNOWLEDGE_INJECT_AFTER_TOOLS` turns it
