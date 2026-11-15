@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import os
+from typing import Any, Dict, List
 
 from langchain_core.messages import AIMessage
 from langgraph.errors import GraphBubbleUp
@@ -27,6 +28,15 @@ from app.core.core_node import NodeAgent
 from app.core.enhanced_state import EnhancedCrewState
 
 logger = logging.getLogger(__name__)
+
+
+def _knowledge_base_disabled() -> bool:
+    """True when knowledge discovery is switched off by the environment."""
+    return os.getenv("DISABLE_KNOWLEDGE_DISCOVERY", "false").lower() in (
+        "true",
+        "1",
+        "yes",
+    )
 
 
 class KnowledgeDiscoveryNode(NodeAgent):
@@ -202,42 +212,87 @@ class KnowledgeDiscoveryNode(NodeAgent):
     
     async def _run_discovery_workflow(self, state: EnhancedCrewState) -> Command:
         """Run the knowledge discovery workflow.
-        
-        This delegates to the workflow defined in workflows/knowledge-discovery.yaml.
+
+        Produces the finding block the executor injects into the worker prompt
+        (:func:`build_knowledge_discovery_report_message`): assigned titles,
+        categories, corpus recommendations and the passages read for the task.
         """
-        # TODO: Implement actual workflow execution via runtime___start_workflow
-        # For now, return a simple result
-        
         current_task = self._get_current_task(state)
-        
-        # Get any pre-assigned titles from the task
-        assigned_titles = []
-        assigned_categories = []
-        
+
+        # Titles/categories the planner already pinned on the task
+        assigned_titles: List[str] = []
+        assigned_categories: List[str] = []
+        task_description = current_task
+
         task_queue = state.get("task_queue", [])
-        for task in task_queue:
+        current_plan = state.get("current_plan", []) or []
+        for task in list(task_queue) + list(current_plan):
+            if not isinstance(task, dict):
+                continue
             if task.get("id") == current_task or task.get("description") == current_task:
-                assigned_titles = task.get("assigned_titles", [])
-                assigned_categories = task.get("assigned_categories", [])
+                assigned_titles = list(task.get("assigned_titles") or [])
+                assigned_categories = list(task.get("assigned_categories") or [])
+                task_description = task.get("description") or current_task
                 break
-        
-        # Build the discovery findings
+
+        # Search the corpus for titles the planner did not name.
+        recommendations: List[Dict[str, Any]] = []
+        passages: List[Dict[str, Any]] = []
+        if not _knowledge_base_disabled():
+            try:
+                from langgraph_crew_knowledge_base.tools import (
+                    knowledge_base___search,
+                )
+
+                import json as _json
+
+                raw = knowledge_base___search(
+                    query=task_description, corpora=None, tier=None, top_k=5
+                )
+                result = _json.loads(raw) if isinstance(raw, str) else (raw or {})
+                for hit in (result.get("results") or [])[:5]:
+                    if not isinstance(hit, dict):
+                        continue
+                    ref = hit.get("kb_ref") or ""
+                    book = hit.get("book_id") or ""
+                    if ref:
+                        passages.append(
+                            {
+                                "kb_ref": ref,
+                                "text": hit.get("text") or "",
+                                "score": hit.get("score"),
+                            }
+                        )
+                    elif book and book not in assigned_titles:
+                        recommendations.append(
+                            {"title": book, "reason": "corpus match"}
+                        )
+            except Exception:  # noqa: BLE001 - discovery must never break the run
+                logger.debug("[KNOWLEDGE_DISCOVERY] corpus search failed", exc_info=True)
+
         findings = {
             "step": "knowledge_discovery",
             "task": current_task,
             "assigned_titles": assigned_titles,
             "assigned_categories": assigned_categories,
-            "recommendations": [],
-            "chunking_jobs": [],
-            "message": "Knowledge discovery completed. Check knowledge_discovery_findings for details.",
+            "recommendations": recommendations,
+            "passages": passages,
+            "chunking_jobs": list(state.get("knowledge_discovery_chunking_jobs") or []),
         }
-        
+
+        count = len(assigned_titles) + len(passages)
         return Command(
             goto="executor",
             update={
                 "knowledge_discovery_findings": findings,
                 "messages": state.get("messages", []) + [
-                    AIMessage(content=f"Knowledge discovery completed. Found {len(assigned_titles)} pre-assigned titles.")
+                    AIMessage(
+                        content=(
+                            "Knowledge discovery completed. "
+                            f"{len(assigned_titles)} assigned title(s), "
+                            f"{len(passages)} passage(s)."
+                        )
+                    )
                 ],
             }
         )
