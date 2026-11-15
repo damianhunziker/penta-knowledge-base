@@ -188,3 +188,36 @@ class TestKnowledgeDiscoveryNode:
         state["task_queue"][0]["requires_knowledge_discovery"] = False
         cmd = asyncio.run(kb_node.knowledge_discovery_node(state))
         assert cmd.goto == "executor"
+
+
+class TestNodeVisibility:
+    """The node must announce itself, like tool discovery does.
+
+    Without the box a run jumped from "ROUTING KNOWLEDGE_DISCOVERY" straight
+    to the worker, so it looked as if the routing had been ignored.
+    """
+
+    def test_node_prints_its_execution_box(self, capsys):
+        import asyncio
+
+        pytest.importorskip("app.core.core_node", reason="core not importable")
+        from langgraph_crew_knowledge_base import node as kb_node
+
+        state = {
+            "messages": [],
+            "current_task": "x",
+            "knowledge_discovery_enabled": True,
+            "knowledge_discovery_completed_for_tasks": [],
+            "task_queue": [
+                {"id": "task_1", "description": "x", "requires_knowledge_discovery": True}
+            ],
+            "current_plan": [],
+        }
+        kb_node._node_cache.clear()
+        asyncio.run(kb_node.knowledge_discovery_node(state))
+        out = capsys.readouterr().out
+        assert "KNOWLEDGE DISCOVERY" in out.upper(), (
+            "the node ran without printing its box - the transcript then looks "
+            "like the executor delegated straight to the worker"
+        )
+        kb_node._node_cache.clear()

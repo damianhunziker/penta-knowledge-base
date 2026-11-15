@@ -88,6 +88,16 @@ class KnowledgeDiscoveryNode(NodeAgent):
         """
         if self.verbose:
             print("📚 [KNOWLEDGE_DISCOVERY_NODE] start")
+
+        # Make the node visible in the transcript. Without this the run jumps
+        # from "ROUTING KNOWLEDGE_DISCOVERY" straight to the worker and looks
+        # like the routing was ignored (tool_discovery prints the same box).
+        try:
+            from app.core.cli_styling import display_node_execution
+
+            display_node_execution("knowledge_discovery")
+        except Exception:  # noqa: BLE001 - display only
+            pass
         
         # ====================================================================
         # DISABLE_KNOWLEDGE_DISCOVERY: Skip knowledge discovery entirely
