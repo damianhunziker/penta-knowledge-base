@@ -183,8 +183,7 @@ class KnowledgeDiscoveryNode(NodeAgent):
             )
         
         if self.verbose:
-            print("📚 [KNOWLEDGE_DISCOVERY_NODE] running discovery")
-        
+            print("📚 [KNOWLEDGE_DISCOVERY_NODE] running discovery")        
         # Run the discovery workflow
         try:
             command = await self._run_discovery_workflow(state)
@@ -306,6 +305,16 @@ class KnowledgeDiscoveryNode(NodeAgent):
             except Exception:  # noqa: BLE001 - discovery must never break the run
                 logger.debug("[KNOWLEDGE_DISCOVERY] corpus search failed", exc_info=True)
 
+        # An empty corpus is a real answer, not a silent no-op: say why nothing
+        # was found, so the transcript does not look like a skipped step.
+        status: Dict[str, Any] = {"ready": True, "reason": "", "chunks": 0}
+        try:
+            from langgraph_crew_knowledge_base.tools import kb_status
+
+            status = kb_status()
+        except Exception:  # noqa: BLE001
+            pass
+
         findings = {
             "step": "knowledge_discovery",
             "task": current_task,
@@ -314,21 +323,35 @@ class KnowledgeDiscoveryNode(NodeAgent):
             "recommendations": recommendations,
             "passages": passages,
             "chunking_jobs": list(state.get("knowledge_discovery_chunking_jobs") or []),
+            "corpus": status,
         }
 
-        count = len(assigned_titles) + len(passages)
+        if status.get("ready"):
+            summary = (
+                "Knowledge discovery completed. "
+                f"{len(assigned_titles)} assigned title(s), "
+                f"{len(passages)} passage(s)."
+            )
+        else:
+            summary = (
+                "Knowledge discovery found no corpus to search: "
+                f"{status.get('reason') or 'not indexed'}. "
+                "Continuing without additional knowledge. "
+                "Ingest documents with knowledge_base___ingest_from_root."
+            )
+            try:
+                from app.core.cli_styling import console
+
+                console.print(f"[dim]📚 [KNOWLEDGE] {summary}[/dim]")
+            except Exception:  # noqa: BLE001 - display only
+                pass
+
         return Command(
             goto="executor",
             update={
                 "knowledge_discovery_findings": findings,
                 "messages": state.get("messages", []) + [
-                    AIMessage(
-                        content=(
-                            "Knowledge discovery completed. "
-                            f"{len(assigned_titles)} assigned title(s), "
-                            f"{len(passages)} passage(s)."
-                        )
-                    )
+                    AIMessage(content=summary)
                 ],
             }
         )

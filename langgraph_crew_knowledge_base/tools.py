@@ -56,6 +56,158 @@ _MOCK_ASSIGNMENTS: Dict[str, List[str]] = {}
 
 _MOCK_CHUNKING_JOBS: Dict[str, Dict] = {}
 
+#: Qdrant collection that holds the indexed knowledge chunks.
+#: One collection, ``corpus``/``tier``/``book_id`` live in the payload — the
+#: same shape deep-reader uses, so a book can be searched corpus-scoped.
+KB_COLLECTION = os.getenv("KNOWLEDGE_COLLECTION", "knowledge_base_chunks")
+
+#: Embedding model used for the corpus (dense, 1024 dims for BGE-M3).
+KB_EMBED_MODEL = os.getenv("KNOWLEDGE_EMBED_MODEL", "BAAI/bge-m3")
+KB_EMBED_DIM = int(os.getenv("KNOWLEDGE_EMBED_DIM", "1024"))
+
+_qdrant_client = None
+_embedder = None
+
+
+def _qdrant():
+    """Lazy Qdrant client (``None`` when Qdrant is unreachable)."""
+    global _qdrant_client
+    if _qdrant_client is not None:
+        return _qdrant_client
+    try:
+        from qdrant_client import QdrantClient
+
+        from config import settings
+
+        url = os.getenv("QDRANT_HOST_URL") or getattr(settings, "qdrant_host_url", "")
+        url = url or os.getenv("QDRANT_URL") or "http://127.0.0.1:6333"
+        api_key = os.getenv("QDRANT_API_KEY") or getattr(settings, "qdrant_api_key", None)
+        _qdrant_client = QdrantClient(url=url, api_key=api_key or None, timeout=10)
+        return _qdrant_client
+    except Exception as exc:  # noqa: BLE001 - knowledge base is optional
+        logger.debug("[KNOWLEDGE_BASE] Qdrant unavailable: %s", exc)
+        return None
+
+
+def _embedder_model():
+    """Lazy sentence-transformers model (``None`` when not installed)."""
+    global _embedder
+    if _embedder is not None:
+        return _embedder
+    try:
+        from sentence_transformers import SentenceTransformer
+
+        _embedder = SentenceTransformer(KB_EMBED_MODEL)
+        return _embedder
+    except Exception as exc:  # noqa: BLE001 - fall back to keyword search
+        logger.debug("[KNOWLEDGE_BASE] embedding model unavailable: %s", exc)
+        return None
+
+
+def _collection_ready() -> bool:
+    """True when the knowledge collection exists AND holds points."""
+    client = _qdrant()
+    if client is None:
+        return False
+    try:
+        if not client.collection_exists(KB_COLLECTION):
+            return False
+        return (client.get_collection(KB_COLLECTION).points_count or 0) > 0
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _vector_search(
+    query: str,
+    top_k: int,
+    corpora: Optional[List[str]] = None,
+    tier: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Dense vector search over the indexed corpus (``[]`` when unavailable)."""
+    if not _collection_ready():
+        return []
+    model = _embedder_model()
+    if model is None:
+        return []
+    client = _qdrant()
+    try:
+        vector = model.encode(query, normalize_embeddings=True).tolist()
+        filt = None
+        conditions = []
+        if corpora:
+            conditions.append(
+                {"key": "corpus", "match": {"any": list(corpora)}}
+            )
+        if tier:
+            conditions.append({"key": "tier", "match": {"value": tier}})
+        if conditions:
+            from qdrant_client import models as qm
+
+            filt = qm.Filter(must=[qm.FieldCondition(**c) for c in conditions])
+        hits = client.search(
+            collection_name=KB_COLLECTION,
+            query_vector=vector,
+            limit=max(1, int(top_k)),
+            query_filter=filt,
+            with_payload=True,
+        )
+    except Exception as exc:  # noqa: BLE001 - retrieval is best effort
+        logger.debug("[KNOWLEDGE_BASE] vector search failed: %s", exc)
+        return []
+
+    results: List[Dict[str, Any]] = []
+    for hit in hits:
+        payload = dict(hit.payload or {})
+        book_id = payload.get("book_id") or ""
+        corpus = payload.get("corpus") or ""
+        section = payload.get("section_path") or ""
+        kb_ref = payload.get("kb_ref") or (
+            f"knowledge_base:{corpus}/{book_id}"
+            + (f"#s:{section}" if section else "")
+        )
+        results.append(
+            {
+                "kb_ref": kb_ref,
+                "title": payload.get("title") or "",
+                "authors": payload.get("authors") or [],
+                "year": payload.get("year"),
+                "tier": payload.get("tier") or "",
+                "book_id": book_id,
+                "corpus": corpus,
+                "section_path": section,
+                "page_from": payload.get("page_from"),
+                "page_to": payload.get("page_to"),
+                "text": payload.get("text") or "",
+                "score": float(hit.score or 0.0),
+            }
+        )
+    return results
+
+
+def kb_status() -> Dict[str, Any]:
+    """Honest state of the corpus (used by tools and the estimate bar)."""
+    client = _qdrant()
+    if client is None:
+        return {"ready": False, "reason": "Qdrant unreachable", "chunks": 0}
+    try:
+        if not client.collection_exists(KB_COLLECTION):
+            return {
+                "ready": False,
+                "reason": f"collection '{KB_COLLECTION}' does not exist",
+                "chunks": 0,
+            }
+        info = client.get_collection(KB_COLLECTION)
+        count = info.points_count or 0
+        if count == 0:
+            return {
+                "ready": False,
+                "reason": f"collection '{KB_COLLECTION}' is empty",
+                "chunks": 0,
+            }
+        return {"ready": True, "reason": "", "chunks": count}
+    except Exception as exc:  # noqa: BLE001
+        return {"ready": False, "reason": str(exc), "chunks": 0}
+
 
 # ── TOOLS ─────────────────────────────────────────────────────────────────────
 
@@ -77,9 +229,25 @@ def knowledge_base___search(
     Returns:
         JSON string with search results
     """
-    # TODO: Implement actual Qdrant search with BGE-M3 hybrid
-    # For now, return mock results based on title/category matching
-    
+    # Real retrieval first: dense vector search over the indexed corpus.
+    vector_hits = _vector_search(query, top_k, corpora, tier)
+    if vector_hits:
+        return json.dumps(
+            {
+                "query": query,
+                "results": vector_hits[:top_k],
+                "total": len(vector_hits),
+                "source": "qdrant",
+            },
+            indent=2,
+        )
+
+    # Nothing indexed (or Qdrant unreachable): say so instead of inventing a
+    # silent empty answer. The old keyword mock below still runs so a demo
+    # catalog behaves as before, but the result is marked as not real.
+    status = kb_status()
+    logger.debug("[KNOWLEDGE_BASE] no vector hits (%s)", status.get("reason"))
+
     results = []
     
     # Mock: find matching books by title, author, or category
@@ -146,6 +314,12 @@ def knowledge_base___search(
         "query": query,
         "results": results[:top_k],
         "total": len(results),
+        "source": "mock-catalog",
+        "warning": (
+            "No indexed corpus: "
+            + (status.get("reason") or "collection empty")
+            + ". Ingest documents first (knowledge_base___ingest_from_root)."
+        ),
     }, indent=2)
 
 
