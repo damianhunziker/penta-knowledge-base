@@ -117,9 +117,37 @@ The planner can set per-task:
 - `requires_knowledge_discovery: true`
 - `assigned_titles: ["meadows-2008"]`
 - `assigned_categories: ["systems-thinking"]`
+- `knowledge_chunks: 5` — how many chunks this task gets at start
+
+## Injection (environment-driven)
+
+Two moments inject knowledge. Both are tuned in `.env`; nothing is hardcoded.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `KNOWLEDGE_INJECT_AFTER_TOOLS` | `13` | Inject a block after this many tool calls. `0` disables mid-run injection. |
+| `KNOWLEDGE_INJECT_CHUNKS` | `3` | Chunks per mid-run block. |
+| `KNOWLEDGE_TASK_CHUNKS` | `3` | Chunks when a task starts (cold injection). |
+| `KNOWLEDGE_INJECT_MAX_PER_RUN` | `6` | Safety cap on mid-run injections per agent run. |
+| `KNOWLEDGE_INJECT_MIN_SCORE` | `0.35` | Retrieval score below which a chunk is dropped. |
+| `KNOWLEDGE_INJECT_BUDGET_TOKENS` | `900` | Token ceiling for one block. |
+| `DISABLE_KNOWLEDGE_DISCOVERY` | `false` | Switch knowledge discovery off entirely. |
+
+**Mid-run** (`pre_model` hook, `injection.py`): runs before every LLM call, so
+it counts completed tool turns. After `KNOWLEDGE_INJECT_AFTER_TOOLS` turns it
+appends a block to `llm_input_messages` — never to `messages`, so it does not
+repeat in later turns. Chunks already injected in the run are skipped, and the
+counter restarts after each injection.
+
+**Task start** (knowledge discovery node): the count comes from the task's
+`knowledge_chunks` when set, otherwise from `KNOWLEDGE_TASK_CHUNKS`. The
+executor injects the result into the worker prompt exactly like the
+tool-researcher report.
+
+A malformed value never breaks a run — it logs a warning and falls back to the
+default.
 
 ## Status
 
 **Phase 0 + D1 complete**: Plugin skeleton, root, seam, renderer, tools, node, workflow, agents.
-
-Next: D2 (wire into executor loop), D3 (planner integration), D5 (background chunking with Docling).
+**Injection complete**: environment-driven mid-run + task-start injection.

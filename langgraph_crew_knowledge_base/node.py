@@ -240,33 +240,59 @@ class KnowledgeDiscoveryNode(NodeAgent):
         passages: List[Dict[str, Any]] = []
         if not _knowledge_base_disabled():
             try:
-                from langgraph_crew_knowledge_base.tools import (
-                    knowledge_base___search,
+                from langgraph_crew_knowledge_base.settings import (
+                    chunks_for_task,
+                    load_settings,
                 )
 
-                import json as _json
-
-                raw = knowledge_base___search(
-                    query=task_description, corpora=None, tier=None, top_k=5
+                settings = load_settings()
+                # How many chunks this task gets at start: the task's own
+                # ``knowledge_chunks`` when set, else KNOWLEDGE_TASK_CHUNKS.
+                limit = chunks_for_task(
+                    next(
+                        (
+                            t
+                            for t in list(task_queue) + list(current_plan)
+                            if isinstance(t, dict)
+                            and (
+                                t.get("id") == current_task
+                                or t.get("description") == current_task
+                            )
+                        ),
+                        {},
+                    ),
+                    settings,
                 )
-                result = _json.loads(raw) if isinstance(raw, str) else (raw or {})
-                for hit in (result.get("results") or [])[:5]:
-                    if not isinstance(hit, dict):
-                        continue
-                    ref = hit.get("kb_ref") or ""
-                    book = hit.get("book_id") or ""
-                    if ref:
-                        passages.append(
-                            {
-                                "kb_ref": ref,
-                                "text": hit.get("text") or "",
-                                "score": hit.get("score"),
-                            }
-                        )
-                    elif book and book not in assigned_titles:
-                        recommendations.append(
-                            {"title": book, "reason": "corpus match"}
-                        )
+
+                if limit > 0:
+                    from langgraph_crew_knowledge_base.tools import (
+                        knowledge_base___search,
+                    )
+
+                    import json as _json
+
+                    raw = knowledge_base___search(
+                        query=task_description, corpora=None, tier=None, top_k=limit
+                    )
+                    result = _json.loads(raw) if isinstance(raw, str) else (raw or {})
+                    for hit in (result.get("results") or [])[:limit]:
+                        if not isinstance(hit, dict):
+                            continue
+                        ref = hit.get("kb_ref") or ""
+                        book = hit.get("book_id") or ""
+                        if ref:
+                            passages.append(
+                                {
+                                    "kb_ref": ref,
+                                    "text": hit.get("text") or "",
+                                    "score": hit.get("score"),
+                                    "title": hit.get("title") or book,
+                                }
+                            )
+                        elif book and book not in assigned_titles:
+                            recommendations.append(
+                                {"title": book, "reason": "corpus match"}
+                            )
             except Exception:  # noqa: BLE001 - discovery must never break the run
                 logger.debug("[KNOWLEDGE_DISCOVERY] corpus search failed", exc_info=True)
 
