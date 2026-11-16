@@ -30,6 +30,32 @@ from app.core.enhanced_state import EnhancedCrewState
 logger = logging.getLogger(__name__)
 
 
+def _assigned_titles_for(agent_id: str, state: Dict[str, Any]) -> List[str]:
+    """Titles assigned to ``agent_id`` (planner task field or agent assignment).
+
+    Two sources, both optional:
+      * ``assigned_titles`` the planner put on the task (per run), and
+      * a standing assignment in the knowledge base (``assign_to_agent``),
+        which is how an operator pins a corpus to an agent once.
+    """
+    titles: List[str] = []
+    try:
+        from langgraph_crew_knowledge_base.tools import (
+            knowledge_base___list_assignments,
+        )
+
+        raw = knowledge_base___list_assignments(agent_id)
+        payload = json.loads(raw) if isinstance(raw, str) else (raw or {})
+        for entry in payload.get("assignments") or []:
+            if isinstance(entry, str) and entry.startswith("book:"):
+                book = entry[len("book:"):]
+                if book not in titles:
+                    titles.append(book)
+    except Exception:  # noqa: BLE001 - assignment is optional
+        logger.debug("[KNOWLEDGE_DISCOVERY] assignment lookup failed", exc_info=True)
+    return titles
+
+
 def _knowledge_base_disabled() -> bool:
     """True when knowledge discovery is switched off by the environment."""
     return os.getenv("DISABLE_KNOWLEDGE_DISCOVERY", "false").lower() in (
@@ -235,6 +261,7 @@ class KnowledgeDiscoveryNode(NodeAgent):
 
         task_queue = state.get("task_queue", [])
         current_plan = state.get("current_plan", []) or []
+        task_role = ""
         for task in list(task_queue) + list(current_plan):
             if not isinstance(task, dict):
                 continue
@@ -242,7 +269,17 @@ class KnowledgeDiscoveryNode(NodeAgent):
                 assigned_titles = list(task.get("assigned_titles") or [])
                 assigned_categories = list(task.get("assigned_categories") or [])
                 task_description = task.get("description") or current_task
+                task_role = str(task.get("role") or task.get("assigned_to") or "")
                 break
+
+        # A standing assignment (assign_to_agent) pins a corpus to the agent
+        # that runs the task, so its titles are always in scope.
+        if not task_role:
+            task_role = str(state.get("active_agent") or state.get("current_agent") or "")
+        if task_role:
+            for title in _assigned_titles_for(task_role, state):
+                if title not in assigned_titles:
+                    assigned_titles.append(title)
 
         # Search the corpus for titles the planner did not name.
         recommendations: List[Dict[str, Any]] = []
@@ -275,6 +312,7 @@ class KnowledgeDiscoveryNode(NodeAgent):
 
                 if limit > 0:
                     from langgraph_crew_knowledge_base.tools import (
+                        knowledge_base___read,
                         knowledge_base___search,
                     )
 

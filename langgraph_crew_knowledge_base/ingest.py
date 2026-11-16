@@ -105,11 +105,16 @@ def resolve_root_path(root_ref: str) -> str:
                   - A direct filesystem path (no colon, or starts with /)
     
     Returns:
-        Absolute filesystem path
+        Absolute filesystem path, translated to the host path when the
+        container path does not exist here.
     
     Raises:
         ValueError: If root is unknown or unreachable
     """
+    return _host_path(_resolve_root_path(root_ref))
+
+
+def _resolve_root_path(root_ref: str) -> str:
     # Handle direct filesystem paths (no colon or starts with /)
     if root_ref.startswith('/') or (':' not in root_ref and os.path.isabs(root_ref)):
         return root_ref
@@ -128,13 +133,19 @@ def resolve_root_path(root_ref: str) -> str:
         # Check if it's a full ref with path
         if ':' in root_ref:
             root_name, relpath = parse(root_ref)
-            spec = spec_for(root_name)
-            # For vault roots, the path is the vault base
-            # The relpath is the file within the vault
-            # We need to get the vault path from config
+            spec_for(root_name)  # raises RootUnknown for a typo in the root
             vault_path = _get_vault_path_for_root(root_name)
             if vault_path:
-                return os.path.join(vault_path, relpath)
+                resolved = os.path.join(vault_path, relpath.replace("/", os.sep))
+                # The vault may be rooted at the project or one level above it:
+                # "project-vault:Knowledge/x.md" has to find
+                # "<vault>/Projects/<project>/Knowledge/x.md" too.
+                if os.path.exists(resolved):
+                    return resolved
+                found = _probe_vault_for(relpath, vault_path)
+                if found:
+                    return found
+                return resolved
             # Fallback: use the spec path if available
             if spec.path:
                 return os.path.join(spec.path, relpath)
@@ -144,8 +155,56 @@ def resolve_root_path(root_ref: str) -> str:
             return _get_vault_path_for_root(root_ref) or spec.path
     except (RootUnknown, RootNotReachable) as e:
         raise ValueError(f"Cannot resolve root: {e}")
-    
+
     raise ValueError(f"Cannot resolve root: {root_ref}")
+
+
+def _probe_vault_for(relpath: str, vault_path: str) -> Optional[str]:
+    """Find ``relpath`` inside ``vault_path`` (also one project level deeper).
+
+    A caller naturally writes ``project-vault:Knowledge/book.md``, but the
+    client vault is rooted above the project (``…/<customer>/Projects/<p>``).
+    Probing the project level keeps that obvious notation working instead of
+    failing with a path error the model cannot repair.
+    """
+    relpath = relpath.replace("/", os.sep)
+    try:
+        for entry in os.listdir(vault_path):
+            projects_dir = os.path.join(vault_path, entry, "Projects")
+            if not os.path.isdir(projects_dir):
+                continue
+            for project in os.listdir(projects_dir):
+                candidate = os.path.join(projects_dir, project, relpath)
+                if os.path.exists(candidate):
+                    return candidate
+    except OSError:
+        return None
+    return None
+
+
+def _host_path(container_path: str) -> str:
+    """Translate a container-side vault path to the host path when needed.
+
+    Everything inside the app container sees ``/vault/...``. When a tool runs
+    on the host (a plugin speaking to Qdrant directly), that path does not
+    exist — ``VAULT_HOST_ROOT`` names the directory the container mounts at
+    ``VAULT_CONTAINER_ROOT``. When the path already exists, it is returned
+    unchanged, so both deployment shapes work.
+    """
+    if not container_path:
+        return container_path
+    if os.path.exists(container_path):
+        return container_path
+    try:
+        container_root = os.getenv("VAULT_CONTAINER_ROOT", "/vault").rstrip("/")
+        host_root = os.getenv("VAULT_HOST_ROOT", "").rstrip("/")
+        if host_root and container_path.startswith(container_root + "/"):
+            mapped = host_root + container_path[len(container_root):]
+            if os.path.exists(mapped):
+                return mapped
+    except Exception:  # noqa: BLE001 - path mapping must not raise
+        pass
+    return container_path
 
 
 def _resolve_root_path_fallback(root_ref: str) -> str:
@@ -168,25 +227,83 @@ def _resolve_root_path_fallback(root_ref: str) -> str:
     return root_map.get(root_ref, root_ref)
 
 
-def _get_vault_path_for_root(root_name: str) -> Optional[str]:
-    """Get the vault path for a vault root."""
+def _active_vault_path() -> Optional[str]:
+    """Absolute path of the active client vault (``None`` when unknown).
+
+    Resolution order, most reliable first:
+
+    1. ``ACTIVE_VAULT_PATH`` from the run's namespace (set by
+       ``set_namespace``) — an absolute path, used as-is;
+    2. the current session context (customer + project) from the project DB,
+       joined with the vault base;
+    3. the customer vault root when only the customer is known.
+
+    Everything is guarded: an unavailable helper means "unknown", not a crash.
+    """
+    # 1) absolute active vault path
     try:
-        from app.core.configuration import get_active_project_path
-        from app.core.mcp_integration import MCPIntegration
-        
-        if root_name == 'project-vault':
-            return get_active_project_path()
-        elif root_name == 'shared-vault':
-            mcp = MCPIntegration.get_instance()
-            if mcp:
-                return mcp._get_vaultforge_shared_path()
-        elif root_name == 'client-vault':
-            mcp = MCPIntegration.get_instance()
-            if mcp:
-                return mcp._get_vaultforge_vault_path()
-    except Exception as e:
-        logger.warning(f"Could not resolve vault path for {root_name}: {e}")
-    
+        from app.core.global_state import get_active_vault_path
+
+        active = get_active_vault_path()
+        if active and os.path.isabs(active) and os.path.isdir(active):
+            return active
+    except Exception:  # noqa: BLE001 - helper optional
+        pass
+
+    # 2) session context (customer + project) under the vault base
+    try:
+        from app.core.configuration import VAULTS_BASE_PATH, get_current_session_id
+        from app.customer_project_db import customer_project_db
+
+        session_id = get_current_session_id()
+        if session_id and session_id not in ("default", "global"):
+            context = customer_project_db.get_current_context(session_id) or {}
+            customer = context.get("customer")
+            project = context.get("project")
+            if customer and project:
+                for candidate in (
+                    os.path.join(VAULTS_BASE_PATH, customer, "Projects", project),
+                    os.path.join(VAULTS_BASE_PATH, customer),
+                ):
+                    if os.path.isdir(candidate):
+                        return candidate
+    except Exception:  # noqa: BLE001
+        pass
+
+    return None
+
+
+def _get_vault_path_for_root(root_name: str) -> Optional[str]:
+    """Base directory of a vault root (``None`` when it cannot be resolved).
+
+    ``client-vault``/``project-vault`` resolve to the active client vault: in
+    this deployment the project vault *is* ``<client>/Projects/<project>``, so
+    both names address the same tree. ``shared-vault`` resolves through the
+    configured shared base.
+    """
+    name = str(root_name or "").strip().rstrip(":")
+    try:
+        if name in ("client-vault", "project-vault", "vault"):
+            active = _active_vault_path()
+            if active:
+                return active
+            # A project-scoped path may still be reachable through the base.
+            from app.core.configuration import VAULTS_BASE_PATH
+
+            return VAULTS_BASE_PATH or None
+
+        if name == "shared-vault":
+            from app.core.configuration import SHARED_VAULT_BASE_PATH
+
+            return SHARED_VAULT_BASE_PATH or None
+
+        if name == "host-workspace":
+            return "/host-workspace"
+        if name == "tmp":
+            return "/tmp"
+    except Exception as exc:  # noqa: BLE001 - resolution must not crash a run
+        logger.warning("Could not resolve vault path for %s: %s", name, exc)
+
     return None
 
 

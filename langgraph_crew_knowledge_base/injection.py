@@ -189,12 +189,17 @@ def knowledge_mid_run_injection(state: Dict[str, Any]) -> Dict[str, Any] | None:
     state[KEY_REFS] = refs
 
     try:
-        from app.core.cli_styling import notify_injection
+        from app.core.cli_styling import display_knowledge_injection
 
-        notify_injection(
-            "knowledge-base",
-            f"after {current} tool calls ({fired + 1}/{settings.max_per_run})",
+        _chunk_count = sum(
+            1 for line in block.splitlines() if line.startswith("↳ read section")
+        )
+        display_knowledge_injection(
+            kind="mid-run",
+            chunks=_chunk_count,
+            tokens=(len(block) + 3) // 4,
             body=block,
+            refs=refs,
         )
     except Exception:  # noqa: BLE001 - display only
         pass
