@@ -69,24 +69,70 @@ _qdrant_client = None
 _embedder = None
 
 
+def _qdrant_urls():
+    """Candidate Qdrant URLs, most specific first.
+
+    The same code runs on the host and inside the app container, and the
+    correct address differs:
+
+    * container  → ``QDRANT_URL`` (``http://qdrant:6333``, the compose service)
+    * host       → ``QDRANT_HOST_URL`` (``http://127.0.0.1:16333``)
+
+    Trying both (cheap, cached) keeps one plugin working in both shapes
+    instead of reporting "connection refused" in whichever one is not first.
+    """
+    urls = []
+    for value in (
+        os.getenv("QDRANT_URL"),
+        getattr(_settings(), "qdrant_url", ""),
+        os.getenv("QDRANT_HOST_URL"),
+        getattr(_settings(), "qdrant_host_url", ""),
+        "http://127.0.0.1:6333",
+    ):
+        url = str(value or "").strip()
+        if url and url not in urls:
+            urls.append(url)
+    return urls
+
+
+def _settings():
+    try:
+        from config import settings
+
+        return settings
+    except Exception:  # noqa: BLE001 - settings optional in tests
+        return None
+
+
 def _qdrant():
-    """Lazy Qdrant client (``None`` when Qdrant is unreachable)."""
+    """Lazy Qdrant client (``None`` when no reachable instance exists).
+
+    The client is bound to the first URL that answers a health probe, so a
+    later search call does not fail because the process guessed the wrong
+    address.
+    """
     global _qdrant_client
     if _qdrant_client is not None:
         return _qdrant_client
     try:
         from qdrant_client import QdrantClient
-
-        from config import settings
-
-        url = os.getenv("QDRANT_HOST_URL") or getattr(settings, "qdrant_host_url", "")
-        url = url or os.getenv("QDRANT_URL") or "http://127.0.0.1:6333"
-        api_key = os.getenv("QDRANT_API_KEY") or getattr(settings, "qdrant_api_key", None)
-        _qdrant_client = QdrantClient(url=url, api_key=api_key or None, timeout=10)
-        return _qdrant_client
-    except Exception as exc:  # noqa: BLE001 - knowledge base is optional
-        logger.debug("[KNOWLEDGE_BASE] Qdrant unavailable: %s", exc)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[KNOWLEDGE_BASE] qdrant-client missing: %s", exc)
         return None
+
+    api_key = os.getenv("QDRANT_API_KEY") or getattr(_settings(), "qdrant_api_key", None)
+    for url in _qdrant_urls():
+        try:
+            client = QdrantClient(
+                url=url, api_key=api_key or None, timeout=5, check_compatibility=False
+            )
+            client.get_collections()  # probe
+            _qdrant_client = client
+            logger.debug("[KNOWLEDGE_BASE] Qdrant at %s", url)
+            return client
+        except Exception as exc:  # noqa: BLE001 - try the next candidate
+            logger.debug("[KNOWLEDGE_BASE] Qdrant %s unreachable: %s", url, exc)
+    return None
 
 
 def _embedder_model():

@@ -136,10 +136,17 @@ def _resolve_root_path(root_ref: str) -> str:
             spec_for(root_name)  # raises RootUnknown for a typo in the root
             vault_path = _get_vault_path_for_root(root_name)
             if vault_path:
-                resolved = os.path.join(vault_path, relpath.replace("/", os.sep))
-                # The vault may be rooted at the project or one level above it:
-                # "project-vault:Knowledge/x.md" has to find
-                # "<vault>/Projects/<project>/Knowledge/x.md" too.
+                rel = relpath.replace("/", os.sep)
+                # A caller may write the path relative to the customer vault
+                # ("Projects/<p>/Knowledge/x.md") although project-vault is
+                # rooted at the project already. Dropping the duplicated
+                # prefix keeps both notations working instead of producing
+                # "…/Projects/<p>/Projects/<p>/…".
+                project_base = os.path.basename(vault_path)
+                dup = os.path.join("Projects", project_base) + os.sep
+                if rel.startswith(dup):
+                    rel = rel[len(dup):]
+                resolved = os.path.join(vault_path, rel)
                 if os.path.exists(resolved):
                     return resolved
                 found = _probe_vault_for(relpath, vault_path)
@@ -162,19 +169,43 @@ def _resolve_root_path(root_ref: str) -> str:
 def _probe_vault_for(relpath: str, vault_path: str) -> Optional[str]:
     """Find ``relpath`` inside ``vault_path`` (also one project level deeper).
 
-    A caller naturally writes ``project-vault:Knowledge/book.md``, but the
-    client vault is rooted above the project (``…/<customer>/Projects/<p>``).
-    Probing the project level keeps that obvious notation working instead of
-    failing with a path error the model cannot repair.
+    Handles the three notations a caller may use, all relative to different
+    roots:
+
+    * ``Knowledge/book.md``                          → project root
+    * ``Projects/<p>/Knowledge/book.md``             → customer vault
+    * ``Projects/<p>/Knowledge/book.md`` with a
+      project-rooted base                            → prefix is stripped first
+
+    The search is deterministic: an exact match against the base wins, then
+    project-level candidates are tried in sorted order, so the same input
+    always resolves to the same file.
     """
-    relpath = relpath.replace("/", os.sep)
+    rel = relpath.replace("/", os.sep)
     try:
-        for entry in os.listdir(vault_path):
-            projects_dir = os.path.join(vault_path, entry, "Projects")
-            if not os.path.isdir(projects_dir):
-                continue
-            for project in os.listdir(projects_dir):
-                candidate = os.path.join(projects_dir, project, relpath)
+        direct = os.path.join(vault_path, rel)
+        if os.path.exists(direct):
+            return direct
+
+        # Candidate suffixes of the relpath: a caller may have stacked
+        # segments ("Projects/<customer>/Projects/<project>/Knowledge/x.md"
+        # although the real tree is "<customer>/Projects/<project>/…"). Every
+        # path is tried from each separator onwards, longest first, so the
+        # most specific match wins.
+        suffixes = [rel]
+        parts = rel.split(os.sep)
+        for i in range(1, len(parts)):
+            suffixes.append(os.sep.join(parts[i:]))
+
+        for suffix in suffixes:
+            candidates = [os.path.join(vault_path, suffix)]
+            for customer in sorted(os.listdir(vault_path)):
+                projects_dir = os.path.join(vault_path, customer, "Projects")
+                if not os.path.isdir(projects_dir):
+                    continue
+                for project in sorted(os.listdir(projects_dir)):
+                    candidates.append(os.path.join(projects_dir, project, suffix))
+            for candidate in candidates:
                 if os.path.exists(candidate):
                     return candidate
     except OSError:
@@ -273,21 +304,53 @@ def _active_vault_path() -> Optional[str]:
     return None
 
 
+def _project_vault_base() -> Optional[str]:
+    """Directory that ``project-vault:`` is rooted at.
+
+    ``project-vault:`` is the *project* tree (``…/<customer>/Projects/<p>``),
+    not the customer vault above it. Callers (vaultforge, the planner) write
+    ``Projects/<p>/Knowledge/x.md`` relative to the customer vault, so a naive
+    join produced ``…/Projects/<p>/Projects/<p>/…``.
+
+    Resolution: the active project directory when a session knows it, else the
+    customer vault (where the probe below can still find the file).
+    """
+    try:
+        from app.core.configuration import VAULTS_BASE_PATH, get_current_session_id
+        from app.customer_project_db import customer_project_db
+
+        session_id = get_current_session_id()
+        if session_id and session_id not in ("default", "global"):
+            context = customer_project_db.get_current_context(session_id) or {}
+            customer = context.get("customer")
+            project = context.get("project")
+            if customer and project:
+                candidate = os.path.join(
+                    VAULTS_BASE_PATH, customer, "Projects", project
+                )
+                if os.path.isdir(candidate):
+                    return candidate
+    except Exception:  # noqa: BLE001 - context optional
+        pass
+
+    active = _active_vault_path()
+    return active
+
+
 def _get_vault_path_for_root(root_name: str) -> Optional[str]:
     """Base directory of a vault root (``None`` when it cannot be resolved).
 
-    ``client-vault``/``project-vault`` resolve to the active client vault: in
-    this deployment the project vault *is* ``<client>/Projects/<project>``, so
-    both names address the same tree. ``shared-vault`` resolves through the
+    ``project-vault``/``client-vault``/: the project tree when a session knows
+    it, else the client vault (the probe in :func:`_resolve_root_path` then
+    searches the project level). ``shared-vault`` resolves through the
     configured shared base.
     """
     name = str(root_name or "").strip().rstrip(":")
     try:
         if name in ("client-vault", "project-vault", "vault"):
-            active = _active_vault_path()
-            if active:
-                return active
-            # A project-scoped path may still be reachable through the base.
+            project_base = _project_vault_base()
+            if project_base:
+                return project_base
             from app.core.configuration import VAULTS_BASE_PATH
 
             return VAULTS_BASE_PATH or None
