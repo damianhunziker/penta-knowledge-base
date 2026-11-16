@@ -1,18 +1,28 @@
 # Knowledge Base
 
+**How to call:** `knowledge_base___*` are **plugin tools and are not bound** —
+run every call as
+`tool_registry___system_request(tool_name="knowledge_base___<tool>", arguments={...})`.
+The quick-start snippets below show the inner tool and its positional arguments
+in order.
+
 Use the knowledge base for domain knowledge, reference material, and training memory.
 
 ## Quick Start
 
 ```
 # Search corpus
-knowledge_base___search("systems thinking")
+tool_registry___system_request(tool_name="knowledge_base___search",
+                              arguments={"query": "systems thinking"})
 
 # Read section
-knowledge_base___read("knowledge_base:academic/meadows-2008/ch3#s:1.2")
+tool_registry___system_request(tool_name="knowledge_base___read",
+                              arguments={"kb_ref": "knowledge_base:academic/meadows-2008/ch3#s:1.2"})
 
 # Ingest from vault
-knowledge_base___ingest_from_root("project-vault:Knowledge/book.md", "academic")
+tool_registry___system_request(tool_name="knowledge_base___ingest_from_root",
+                              arguments={"root_ref": "project-vault:Knowledge/book.md",
+                                         "corpus": "academic"})
 ```
 
 ## kb_ref Grammar
