@@ -38,3 +38,6 @@ htmlcov/
 Thumbs.db
 # Local plugin configuration (copy plugin.env.example to plugin.env)
 plugin.env
+
+# Assignment database (created on first use)
+knowledge_base.db

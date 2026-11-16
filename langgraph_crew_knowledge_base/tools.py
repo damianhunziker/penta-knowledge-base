@@ -701,49 +701,45 @@ def knowledge_base___assign_to_agent(
 ) -> str:
     """
     Assign titles/categories to an agent.
-    
+
+    An assignment is "this agent always has these titles in scope": the
+    knowledge discovery adds them to every task the agent runs, without
+    searching first. Assignments are stored persistently (SQLite next to the
+    plugin), so one run can set them and the next run still sees them.
+
     Args:
-        agent_id: The agent identifier
-        book_ids: List of book IDs to assign
-        categories: List of categories to assign
-        tags: List of tags to assign
-        assigned_by: Who assigned ('planner', 'self', 'yaml')
-        
+        agent_id: The agent identifier (e.g. "digital_marketing_manager_agent")
+        book_ids: Book ids to assign (the ``book_id`` reported by the ingest)
+        categories: Categories to assign
+        tags: Tags to assign
+        assigned_by: Who assigned ('planner', 'self', 'yaml', 'operator')
+
     Returns:
-        JSON string with assignment status
+        JSON string with the newly added entries and the agent's full list
     """
-    if agent_id not in _MOCK_ASSIGNMENTS:
-        _MOCK_ASSIGNMENTS[agent_id] = []
-    
-    assigned = []
-    
-    if book_ids:
-        for book_id in book_ids:
-            assignment = f"book:{book_id}"
-            if assignment not in _MOCK_ASSIGNMENTS[agent_id]:
-                _MOCK_ASSIGNMENTS[agent_id].append(assignment)
-                assigned.append(assignment)
-    
-    if categories:
-        for cat in categories:
-            assignment = f"category:{cat}"
-            if assignment not in _MOCK_ASSIGNMENTS[agent_id]:
-                _MOCK_ASSIGNMENTS[agent_id].append(assignment)
-                assigned.append(assignment)
-    
-    if tags:
-        for tag in tags:
-            assignment = f"tag:{tag}"
-            if assignment not in _MOCK_ASSIGNMENTS[agent_id]:
-                _MOCK_ASSIGNMENTS[agent_id].append(assignment)
-                assigned.append(assignment)
-    
+    from langgraph_crew_knowledge_base.assignments import assign
+
+    result = assign(
+        agent_id,
+        books=book_ids or (),
+        categories=categories or (),
+        tags=tags or (),
+        assigned_by=assigned_by,
+    )
+    if result.get("error"):
+        return json.dumps(result, indent=2)
+
+    added = result.get("assigned") or []
     return json.dumps({
         "agent_id": agent_id,
-        "assigned": assigned,
-        "total_assignments": len(_MOCK_ASSIGNMENTS[agent_id]),
+        "assigned": added,
+        "total_assignments": len(result.get("all") or []),
+        "all_assignments": result.get("all") or [],
         "assigned_by": assigned_by,
-        "message": f"Assigned {len(assigned)} items to agent {agent_id}",
+        "message": (
+            f"Assigned {len(added)} new item(s) to {agent_id}"
+            + ("" if added else " (all already present)")
+        ),
     }, indent=2)
 
 
@@ -752,24 +748,26 @@ def knowledge_base___list_assignments(
 ) -> str:
     """
     List assignments for one or all agents.
-    
+
     Args:
         agent_id: Specific agent, or all agents if omitted
-        
+
     Returns:
         JSON string with assignments
     """
+    from langgraph_crew_knowledge_base.assignments import list_all, list_for_agent
+
     if agent_id:
-        assignments = _MOCK_ASSIGNMENTS.get(agent_id, [])
         return json.dumps({
             "agent_id": agent_id,
-            "assignments": assignments,
+            "assignments": list_for_agent(agent_id),
         }, indent=2)
-    else:
-        return json.dumps({
-            "agents": {aid: assignments for aid, assignments in _MOCK_ASSIGNMENTS.items()},
-            "total_agents": len(_MOCK_ASSIGNMENTS),
-        }, indent=2)
+
+    everything = list_all()
+    return json.dumps({
+        "agents": everything,
+        "total_agents": len(everything),
+    }, indent=2)
 
 
 def knowledge_base___get_catalog() -> str:

@@ -30,30 +30,55 @@ from app.core.enhanced_state import EnhancedCrewState
 logger = logging.getLogger(__name__)
 
 
-def _assigned_titles_for(agent_id: str, state: Dict[str, Any]) -> List[str]:
-    """Titles assigned to ``agent_id`` (planner task field or agent assignment).
+def _manifest_knowledge_config(agent_id: str) -> Dict[str, Any]:
+    """``x-penta.knowledge_base`` of the agent's manifest (``{}`` when absent).
 
-    Two sources, both optional:
-      * ``assigned_titles`` the planner put on the task (per run), and
-      * a standing assignment in the knowledge base (``assign_to_agent``),
-        which is how an operator pins a corpus to an agent once.
+    Resolution follows the description-language ladder (project → client →
+    plugin → custom → core), so a deployment can override the corpus binding of
+    a plugin agent by dropping ``agents/<name>.md`` into ``custom/`` or the
+    client/project folder — no code change needed.
     """
-    titles: List[str] = []
     try:
-        from langgraph_crew_knowledge_base.tools import (
-            knowledge_base___list_assignments,
-        )
+        from app.core.spec.loader import load_agent_manifest
 
-        raw = knowledge_base___list_assignments(agent_id)
-        payload = json.loads(raw) if isinstance(raw, str) else (raw or {})
-        for entry in payload.get("assignments") or []:
-            if isinstance(entry, str) and entry.startswith("book:"):
-                book = entry[len("book:"):]
-                if book not in titles:
-                    titles.append(book)
+        # Manifests are named without the "_agent" suffix by convention; try
+        # both spellings so either works.
+        for name in (agent_id, agent_id.removesuffix("_agent")):
+            manifest = load_agent_manifest(name)
+            if manifest is None:
+                continue
+            config = getattr(getattr(manifest, "x_penta", None), "knowledge_base", None)
+            if config is None:
+                continue
+            return {
+                "titles": list(getattr(config, "titles", []) or []),
+                "categories": list(getattr(config, "categories", []) or []),
+                "tags": list(getattr(config, "tags", []) or []),
+                "chunks": getattr(config, "chunks", None),
+                "enabled": bool(getattr(config, "enabled", True)),
+            }
+    except Exception:  # noqa: BLE001 - manifest optional
+        logger.debug("[KNOWLEDGE_DISCOVERY] manifest knowledge config failed", exc_info=True)
+    return {}
+
+
+def _assigned_titles_for(agent_id: str, state: Dict[str, Any]) -> List[str]:
+    """Titles assigned to ``agent_id`` (persisted, survives a restart).
+
+    An assignment is the standing "this agent always has these titles in
+    scope" — set once with ``assign_to_agent``, read on every task the agent
+    runs. The planner can still pin additional titles per task; both lists are
+    merged by the caller.
+    """
+    if not agent_id:
+        return []
+    try:
+        from langgraph_crew_knowledge_base.assignments import books_for_agent
+
+        return books_for_agent(agent_id)
     except Exception:  # noqa: BLE001 - assignment is optional
         logger.debug("[KNOWLEDGE_DISCOVERY] assignment lookup failed", exc_info=True)
-    return titles
+        return []
 
 
 def _knowledge_base_disabled() -> bool:
@@ -273,10 +298,40 @@ class KnowledgeDiscoveryNode(NodeAgent):
                 break
 
         # A standing assignment (assign_to_agent) pins a corpus to the agent
-        # that runs the task, so its titles are always in scope.
+        # that runs the task, so its titles are always in scope. The manifest
+        # (x-penta.knowledge_base) declares the same thing in description
+        # language; both are merged, the manifest first because it is the
+        # operator's explicit statement about THIS agent.
         if not task_role:
             task_role = str(state.get("active_agent") or state.get("current_agent") or "")
         if task_role:
+            manifest_config = _manifest_knowledge_config(task_role)
+            if manifest_config.get("enabled") is False:
+                if self.verbose:
+                    print(f"📚 [KNOWLEDGE] disabled by manifest for {task_role}")
+                return Command(
+                    goto="executor",
+                    update={
+                        "knowledge_discovery_findings": {
+                            "step": "knowledge_discovery",
+                            "task": current_task,
+                            "assigned_titles": [],
+                            "assigned_categories": [],
+                            "recommendations": [],
+                            "passages": [],
+                            "chunking_jobs": [],
+                            "corpus": {"ready": True, "reason": "disabled by manifest",
+                                       "chunks": 0},
+                        },
+                        "messages": state.get("messages", []),
+                    },
+                )
+            for title in manifest_config.get("titles") or []:
+                if title not in assigned_titles:
+                    assigned_titles.append(title)
+            for category in manifest_config.get("categories") or []:
+                if category not in assigned_categories:
+                    assigned_categories.append(category)
             for title in _assigned_titles_for(task_role, state):
                 if title not in assigned_titles:
                     assigned_titles.append(title)
@@ -292,23 +347,36 @@ class KnowledgeDiscoveryNode(NodeAgent):
                 )
 
                 settings = load_settings()
-                # How many chunks this task gets at start: the task's own
-                # ``knowledge_chunks`` when set, else KNOWLEDGE_TASK_CHUNKS.
-                limit = chunks_for_task(
-                    next(
-                        (
-                            t
-                            for t in list(task_queue) + list(current_plan)
-                            if isinstance(t, dict)
-                            and (
-                                t.get("id") == current_task
-                                or t.get("description") == current_task
-                            )
-                        ),
-                        {},
+                # How many chunks this task gets at start, in priority order:
+                #   1. the task's own ``knowledge_chunks`` (planner decision),
+                #   2. ``x-penta.knowledge_base.chunks`` of the agent manifest,
+                #   3. KNOWLEDGE_TASK_CHUNKS from the plugin env.
+                _task_for_limit = next(
+                    (
+                        t
+                        for t in list(task_queue) + list(current_plan)
+                        if isinstance(t, dict)
+                        and (
+                            t.get("id") == current_task
+                            or t.get("description") == current_task
+                        )
                     ),
-                    settings,
+                    {},
                 )
+                _manifest_chunks = (
+                    _manifest_knowledge_config(task_role).get("chunks")
+                    if task_role
+                    else None
+                )
+                if (
+                    _task_for_limit.get("knowledge_chunks") is None
+                    and _manifest_chunks is not None
+                ):
+                    _task_for_limit = {
+                        **_task_for_limit,
+                        "knowledge_chunks": _manifest_chunks,
+                    }
+                limit = chunks_for_task(_task_for_limit, settings)
 
                 if limit > 0:
                     from langgraph_crew_knowledge_base.tools import (
