@@ -358,10 +358,32 @@ def knowledge_base___ingest_from_root(
             if not book_id:
                 book_id = str(uuid.uuid4())[:8]
             
-            # TODO: Actual chunking and embedding
-            # For now, return a mock result
+            # Actually chunk + embed + upsert into Qdrant.
+            from langgraph_crew_knowledge_base.indexer import index_markdown
+            from langgraph_crew_knowledge_base.tools import _qdrant
+
+            client = _qdrant()
+            if client is None:
+                raise RuntimeError(
+                    "Qdrant unreachable - cannot index the document"
+                )
+
+            indexed = index_markdown(
+                client,
+                file_path,
+                book_id=book_id,
+                title=final_title,
+                corpus=corpus,
+                authors=final_authors,
+                year=fm.get("year"),
+                tier=final_tier,
+                categories=final_categories,
+                tags=final_tags,
+                source_ref=root_ref,
+            )
+
             result.update({
-                "status": "queued" if background else "completed",
+                "status": indexed.get("status", "indexed"),
                 "title": final_title,
                 "authors": final_authors,
                 "tier": final_tier,
@@ -369,8 +391,14 @@ def knowledge_base___ingest_from_root(
                 "tags": final_tags,
                 "book_id": book_id,
                 "kb_ref": f"knowledge_base:{corpus}/{book_id}",
+                "chunks": indexed.get("chunks", 0),
+                "sections": indexed.get("sections", 0),
+                "collection": indexed.get("collection", ""),
                 "frontmatter": fm,
-                "message": f"Markdown file queued for ingestion: {final_title}",
+                "message": (
+                    f"Indexed {indexed.get('chunks', 0)} chunk(s) from "
+                    f"{final_title} into corpus '{corpus}'"
+                ),
             })
             
         except Exception as e:

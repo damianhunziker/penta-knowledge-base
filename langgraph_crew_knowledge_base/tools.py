@@ -90,17 +90,17 @@ def _qdrant():
 
 
 def _embedder_model():
-    """Lazy sentence-transformers model (``None`` when not installed)."""
+    """Embedding backend for queries (same server as the indexer)."""
     global _embedder
     if _embedder is not None:
         return _embedder
     try:
-        from sentence_transformers import SentenceTransformer
+        from langgraph_crew_knowledge_base.indexer import _embeddings
 
-        _embedder = SentenceTransformer(KB_EMBED_MODEL)
+        _embedder = _embeddings()
         return _embedder
     except Exception as exc:  # noqa: BLE001 - fall back to keyword search
-        logger.debug("[KNOWLEDGE_BASE] embedding model unavailable: %s", exc)
+        logger.debug("[KNOWLEDGE_BASE] embedding backend unavailable: %s", exc)
         return None
 
 
@@ -131,7 +131,7 @@ def _vector_search(
         return []
     client = _qdrant()
     try:
-        vector = model.encode(query, normalize_embeddings=True).tolist()
+        vector = model.embed_query(query)
         filt = None
         conditions = []
         if corpora:
@@ -144,13 +144,25 @@ def _vector_search(
             from qdrant_client import models as qm
 
             filt = qm.Filter(must=[qm.FieldCondition(**c) for c in conditions])
-        hits = client.search(
-            collection_name=KB_COLLECTION,
-            query_vector=vector,
-            limit=max(1, int(top_k)),
-            query_filter=filt,
-            with_payload=True,
-        )
+        # Newer qdrant-client removed ``search()`` in favour of
+        # ``query_points()``; support both so either version works.
+        if hasattr(client, "query_points"):
+            response = client.query_points(
+                collection_name=KB_COLLECTION,
+                query=vector,
+                limit=max(1, int(top_k)),
+                query_filter=filt,
+                with_payload=True,
+            )
+            hits = list(response.points)
+        else:
+            hits = client.search(
+                collection_name=KB_COLLECTION,
+                query_vector=vector,
+                limit=max(1, int(top_k)),
+                query_filter=filt,
+                with_payload=True,
+            )
     except Exception as exc:  # noqa: BLE001 - retrieval is best effort
         logger.debug("[KNOWLEDGE_BASE] vector search failed: %s", exc)
         return []
