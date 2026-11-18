@@ -12,3 +12,5 @@ This plugin owns the knowledge corpus (books, academic literature). Its rules ap
 - Ingest from vault roots: `tool_registry___system_request(tool_name="knowledge_base___ingest_from_root", arguments={"root_ref": "project-vault:Knowledge/book.md", "corpus": …})`. Markdown frontmatter provides metadata.
 - **Injection is tuned in `plugin.env`.** Copy `plugin.env.example`: `KNOWLEDGE_INJECT_AFTER_TOOLS` (default 13), `KNOWLEDGE_INJECT_CHUNKS` (3), `KNOWLEDGE_TASK_CHUNKS` (3). A task may override the start count with `knowledge_chunks`. See `settings.py`.
 - **Injected blocks are tail-safe.** They go into `llm_input_messages` as a `runtime_reminder` HumanMessage, never into `messages` — they must not repeat in later turns.
+- **Grants carry a scope.** `project` (default) · `client` (one customer) · `deployment` (every customer). A run sees deployment ∪ its customer ∪ its project — narrow never leaks wide. `client`/`deployment` need `authorized_by="user"` + a note, otherwise ask the human.
+- **`grant_access` writes both halves**: the store row and the manifest at that level (merged, never replaced). `access_matrix` shows who may read what, and where.

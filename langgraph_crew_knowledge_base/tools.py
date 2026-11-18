@@ -698,14 +698,27 @@ def knowledge_base___assign_to_agent(
     categories: Optional[List[str]] = None,
     tags: Optional[List[str]] = None,
     assigned_by: str = "self",
+    scope: str = "project",
+    customer: str = "",
+    project: str = "",
 ) -> str:
     """
-    Assign titles/categories to an agent.
+    Assign titles/categories to an agent, at a chosen SCOPE.
 
     An assignment is "this agent always has these titles in scope": the
-    knowledge discovery adds them to every task the agent runs, without
-    searching first. Assignments are stored persistently (SQLite next to the
-    plugin), so one run can set them and the next run still sees them.
+    knowledge discovery adds them to every task the agent runs there, without
+    searching first. Assignments are persisted (SQLite), so one run can set them
+    and the next run still sees them.
+
+    `scope` is the decision that matters — who should get the title:
+
+        "deployment"  every agent of every customer (the generally available
+                      corpus; written to the deployment/"custom" rung)
+        "client"      every project of one customer
+        "project"     one project only (the default — narrowest, safest)
+
+    A run sees deployment ∪ its customer ∪ its project; a narrower assignment
+    never leaks into another scope.
 
     Args:
         agent_id: The agent identifier (e.g. "digital_marketing_manager_agent")
@@ -713,6 +726,9 @@ def knowledge_base___assign_to_agent(
         categories: Categories to assign
         tags: Tags to assign
         assigned_by: Who assigned ('planner', 'self', 'yaml', 'operator')
+        scope: 'project' (default) | 'client' | 'deployment'
+        customer: Customer for client/project scope (default: active scope)
+        project: Project for project scope (default: active scope)
 
     Returns:
         JSON string with the newly added entries and the agent's full list
@@ -725,19 +741,30 @@ def knowledge_base___assign_to_agent(
         categories=categories or (),
         tags=tags or (),
         assigned_by=assigned_by,
+        scope=scope,
+        customer=customer,
+        project=project,
     )
     if result.get("error"):
         return json.dumps(result, indent=2)
 
     added = result.get("assigned") or []
+    target = result.get("scope") or {}
+    where = target.get("scope", scope)
+    if where == "client":
+        where += f" ({target.get('customer')})"
+    elif where == "project":
+        where += f" ({target.get('customer')}/{target.get('project')})"
     return json.dumps({
         "agent_id": agent_id,
         "assigned": added,
+        "scope": target,
+        "database": result.get("database"),
         "total_assignments": len(result.get("all") or []),
         "all_assignments": result.get("all") or [],
         "assigned_by": assigned_by,
         "message": (
-            f"Assigned {len(added)} new item(s) to {agent_id}"
+            f"Assigned {len(added)} new item(s) to {agent_id} at {where}"
             + ("" if added else " (all already present)")
         ),
     }, indent=2)
@@ -745,29 +772,405 @@ def knowledge_base___assign_to_agent(
 
 def knowledge_base___list_assignments(
     agent_id: Optional[str] = None,
+    scope: Optional[str] = None,
 ) -> str:
     """
     List assignments for one or all agents.
 
+    With no `scope`, one agent is listed ladder-aware: what that agent sees
+    from the ACTIVE customer/project (deployment ∪ client ∪ project). With a
+    `scope` ('deployment' | 'client' | 'project' | '*'), exactly that rung is
+    listed.
+
     Args:
         agent_id: Specific agent, or all agents if omitted
+        scope: Optional rung filter ('deployment', 'client', 'project', '*' = all)
 
     Returns:
         JSON string with assignments
     """
-    from langgraph_crew_knowledge_base.assignments import list_all, list_for_agent
+    from langgraph_crew_knowledge_base.assignments import (
+        list_all,
+        list_for_agent,
+        current_scope,
+    )
 
+    live = current_scope()
     if agent_id:
         return json.dumps({
             "agent_id": agent_id,
-            "assignments": list_for_agent(agent_id),
+            "scope": scope or "ladder",
+            "active_customer": live.get("customer") or None,
+            "active_project": live.get("project") or None,
+            "assignments": list_for_agent(agent_id, scope=scope),
         }, indent=2)
 
-    everything = list_all()
+    everything = list_all(scope=scope)
     return json.dumps({
         "agents": everything,
+        "scope": scope or "all",
         "total_agents": len(everything),
     }, indent=2)
+
+
+def knowledge_base___grant_access(
+    agent_id: str,
+    scope: str = "project",
+    customer: str = "",
+    project: str = "",
+    titles: Optional[List[str]] = None,
+    categories: Optional[List[str]] = None,
+    tags: Optional[List[str]] = None,
+    level: str = "",
+    authorized_by: str = "",
+    authorization_note: str = "",
+    assigned_by: str = "self",
+) -> str:
+    """
+    Grant knowledge access to an agent AND record it where that scope lives.
+
+    `assign_to_agent` says what an agent may read inside the knowledge store.
+    This tool additionally writes the same grant into the agent's MANIFEST at
+    the matching description-language level, so the decision becomes part of
+    the deployment rather than a row only this plugin knows about:
+
+        scope 'deployment' -> custom/agents/<agent>.md      (everyone)
+        scope 'client'     -> <customer>/agents/<agent>.md  (that customer)
+        scope 'project'    -> <project>/agents/<agent>.md   (that project)
+
+    Decide the scope by who should get the title. Narrow is the safe default:
+    a project-level grant cannot surprise another project. Wider scopes
+    (client, deployment) affect other scopes than the one you are in, so they
+    need an explicit instruction — pass `authorized_by="user"` (or "planner")
+    plus `authorization_note`, otherwise the call is refused and you should ask
+    the human first.
+
+    `level` may override the manifest level independently of `scope` (defaults
+    to the scope). Note that the repo is read-only inside the container, so a
+    `custom`/`deployment` manifest write is refused there: the store row is
+    still written (the grant is active) and the response says where the
+    operator has to apply the file.
+
+    Args:
+        agent_id: Agent key, e.g. "project_manager_agent"
+        scope: 'project' (default) | 'client' | 'deployment'
+        customer: Customer for client/project scope (default: active scope)
+        project: Project for project scope (default: active scope)
+        titles: Book ids to grant
+        categories: Categories to grant
+        tags: Tags to grant
+        level: Manifest level override ('project' | 'client' | 'custom')
+        authorized_by: 'user' or 'planner' — required for client/deployment
+        authorization_note: What exactly was ordered, and by whom
+        assigned_by: Who set the store row ('self', 'operator', 'planner', …)
+
+    Returns:
+        JSON string with the store result and the manifest write result
+    """
+    import os
+
+    from langgraph_crew_knowledge_base.assignments import assign, current_scope
+
+    live = current_scope()
+    customer = (customer or live.get("customer") or "").strip()
+    project = (project or live.get("project") or "").strip()
+
+    store = assign(
+        agent_id,
+        books=titles or (),
+        categories=categories or (),
+        tags=tags or (),
+        assigned_by=assigned_by,
+        scope=scope,
+        customer=customer,
+        project=project,
+    )
+    if store.get("error"):
+        return json.dumps({"stored": False, "store": store}, indent=2)
+
+    manifest = _write_manifest_grant(
+        agent_id,
+        target=store.get("scope") or {},
+        titles=titles or [],
+        categories=categories or [],
+        tags=tags or [],
+        level=level,
+        authorized_by=authorized_by,
+        authorization_note=authorization_note,
+    )
+
+    if not manifest.get("written"):
+        where = "store row written; manifest not written (see manifest.error)"
+    elif (level or (store.get("scope") or {}).get("scope")) == "project":
+        where = "this project only (active for the next run, no reload needed)"
+    else:
+        where = "wider scope written — call runtime___spec_reload to activate"
+
+    return json.dumps({
+        "agent_id": agent_id,
+        "scope": store.get("scope"),
+        "stored": bool(store.get("assigned") is not None),
+        "assigned": store.get("assigned") or [],
+        "database": store.get("database"),
+        "manifest": manifest,
+        "active": where,
+        "path": manifest.get("path"),
+    }, indent=2)
+
+
+def _manifest_path_for(name: str, level: str) -> Optional[str]:
+    """``<level>/agents/<name>.md`` when that exact file is the one to merge.
+
+    ``None`` means "write a fresh manifest at ``level``" — either the file does
+    not exist, or the ladder resolves to a more specific level whose manifest
+    must not be touched.
+    """
+    import os
+
+    try:
+        from app.core.spec.authoring import _custom_root as authoring_custom_root
+        from app.core.spec.authoring import _project_root as authoring_project_root
+        from app.core.spec.loader import spec_roots
+    except Exception:  # noqa: BLE001
+        return None
+
+    try:
+        if level == "custom":
+            root = authoring_custom_root()
+        elif level == "project":
+            root = authoring_project_root()
+        else:
+            # client: <client_vaults>/<customer>/agents/<name>.md
+            from app.core import access_scope
+
+            scope = access_scope.current_scope()
+            client_root = str(getattr(scope, "client_root", "") or "")
+            if not client_root:
+                return None
+            root = client_root
+    except Exception:  # noqa: BLE001 - authoring raises with its own message
+        return None
+    if not root:
+        return None
+    candidate = os.path.join(root, "agents", f"{name}.md")
+
+    # The ladder may resolve to a MORE specific file than the level being
+    # written (a project manifest beats the custom one). Merging into that file
+    # would put the grant in the wrong scope silently — merge only into a file
+    # that belongs to this very level.
+    for entry in spec_roots():
+        if entry.level != level:
+            continue
+        try:
+            if os.path.realpath(entry.path) == os.path.realpath(root):
+                return candidate
+        except OSError:
+            continue
+    return None
+
+
+def _write_manifest_grant(
+    agent_id: str,
+    *,
+    target: Dict[str, Any],
+    titles: List[str],
+    categories: List[str],
+    tags: List[str],
+    level: str = "",
+    authorized_by: str = "",
+    authorization_note: str = "",
+) -> Dict[str, Any]:
+    """Write/merge ``x-penta.knowledge_base`` into the agent's manifest.
+
+    Merges with what is already declared at that level (a manifest may carry
+    other x-penta keys, or other titles): the grant adds, it does not replace.
+    """
+    import os
+
+    import yaml
+
+    from app.core.spec.authoring import AuthoringError, write_manifest
+
+    scope_name = str(target.get("scope") or "project")
+    level = (level or "").strip() or (
+        "custom" if scope_name == "deployment" else scope_name
+    )
+    name = str(agent_id or "").strip().removesuffix("_agent")
+    if not name:
+        return {"written": False, "error": "agent_id is required"}
+
+    if not (titles or categories or tags):
+        return {
+            "written": False,
+            "skipped": "no titles/categories/tags given — nothing to declare",
+        }
+
+    # Merge into the file that is actually there, not into a fresh template.
+    # A hand-written manifest carries a description, a body and other x-penta
+    # keys; replacing it with a generated stub would silently destroy them, so
+    # the existing frontmatter is read as raw YAML and only the
+    # knowledge_base block is touched. The body is kept verbatim.
+    data: Dict[str, Any] = {}
+    body_text = ""
+    same_level = _manifest_path_for(name, level)
+    target_file = same_level
+    if same_level is None:
+        # No manifest of this exact level yet: read the most specific one that
+        # exists to keep its human-written description and body, while the
+        # knowledge block is written at the requested level (the ladder has to
+        # still resolve to the level with the new grant).
+        try:
+            from app.core.spec.loader import load_agent_manifest
+
+            resolved = load_agent_manifest(name)
+            target_file = getattr(resolved, "source_path", None)
+        except Exception:  # noqa: BLE001 - best effort
+            target_file = None
+    if target_file and os.path.isfile(target_file):
+        try:
+            from app.core.spec.models import split_frontmatter
+
+            data, body_text = split_frontmatter(
+                open(target_file, encoding="utf-8").read()
+            )
+        except Exception:  # noqa: BLE001 - a broken file gets a minimal header
+            data, body_text = {}, ""
+
+    if not data.get("name"):
+        data.update(
+            {
+                "spec_version": 1,
+                "kind": "agent",
+                "name": name,
+                "description": (
+                    f"Knowledge access for {name}: corpus grants declared at "
+                    f"{level} level."
+                ),
+            }
+        )
+
+    x_penta = data.get("x-penta")
+    if not isinstance(x_penta, dict):
+        x_penta = {} if x_penta in (None, "") else {"_penta": x_penta}
+        data["x-penta"] = x_penta
+    knowledge = x_penta.get("knowledge_base")
+    if not isinstance(knowledge, dict):
+        knowledge = {}
+        x_penta["knowledge_base"] = knowledge
+
+    existing_titles = [str(t) for t in (knowledge.get("titles") or [])]
+    existing_categories = [str(c) for c in (knowledge.get("categories") or [])]
+    existing_tags = [str(t) for t in (knowledge.get("tags") or [])]
+
+    merged_titles = list(dict.fromkeys(existing_titles + list(titles)))
+    merged_categories = list(dict.fromkeys(existing_categories + list(categories)))
+    merged_tags = list(dict.fromkeys(existing_tags + list(tags)))
+
+    knowledge["titles"] = merged_titles
+    knowledge["categories"] = merged_categories
+    knowledge["tags"] = merged_tags
+
+    header = yaml.safe_dump(data, sort_keys=False, allow_unicode=True)
+    content = f"---\n{header}---\n{body_text}"
+
+    try:
+        result = write_manifest(
+            "agent",
+            name,
+            content,
+            level=level,
+            overwrite=True,
+            authorized_by=authorized_by,
+            authorization_note=authorization_note,
+        )
+    except AuthoringError as exc:
+        return {
+            "written": False,
+            "level": level,
+            "error": str(exc),
+            "hint": (
+                "the store row IS written — the agent has access from this "
+                "run on. Only the manifest (the durable declaration for that "
+                "level) was refused."
+            ),
+        }
+    except Exception as exc:  # noqa: BLE001 - reporting, never crashing
+        return {"written": False, "level": level, "error": f"{type(exc).__name__}: {exc}"}
+
+    return {
+        "written": bool(result.get("written")),
+        "level": level,
+        "path": result.get("path"),
+        "titles": merged_titles,
+        "categories": merged_categories,
+        "tags": merged_tags,
+    }
+
+
+def knowledge_base___access_matrix() -> str:
+    """
+    Show WHO may read WHAT, and at which scope — the access overview table.
+
+    Answers the question an operator actually asks ("where is this title
+    available?"): every grant per agent, per scope, with the filesystem place
+    that grant is declared in — so the same table can be written to, not only
+    read.
+
+    Returns:
+        JSON string: scopes, per-agent grants, and per-title coverage
+    """
+    import os
+
+    from langgraph_crew_knowledge_base.assignments import (
+        current_scope,
+        db_path,
+        grants,
+    )
+
+    rows = grants()
+    live = current_scope()
+
+    by_agent: Dict[str, List[Dict[str, Any]]] = {}
+    by_value: Dict[str, List[Dict[str, Any]]] = {}
+    for row in rows:
+        entry = {
+            "kind": row["kind"],
+            "value": row["value"],
+            "scope": row["scope"],
+            "customer": row["customer"],
+            "project": row["project"],
+        }
+        by_agent.setdefault(row["agent_id"], []).append(entry)
+        by_value.setdefault(f"{row['kind']}:{row['value']}", []).append(
+            {"agent_id": row["agent_id"], **entry}
+        )
+
+    # Where each scope is declared on disk (the writable half of the table).
+    ladder = {
+        "deployment": "custom/agents/<agent>.md      → every customer",
+        "client": "clients/<customer>/agents/<agent>.md → one customer",
+        "project": "<project>/agents/<agent>.md      → one project",
+        "legacy": "rows written before scoping existed (read as deployment)",
+    }
+
+    return json.dumps(
+        {
+            "database": str(db_path()),
+            "writable": os.access(str(db_path().parent), os.W_OK),
+            "active_scope": live,
+            "scopes": ["deployment", "client", "project", "legacy"],
+            "ladder": ladder,
+            "agents": by_agent,
+            "titles": by_value,
+            "total_rows": len(rows),
+            "how_to_write": (
+                "knowledge_base___grant_access(agent_id, scope=…, titles=…, "
+                "authorized_by='user', authorization_note=…) — the same table, "
+                "written instead of read"
+            ),
+        },
+        indent=2,
+    )
 
 
 def _build_catalog_from_qdrant() -> Dict[str, Any]:
@@ -851,9 +1254,11 @@ __all__ = [
     # Chunking
     "knowledge_base___chunk_document",
     "knowledge_base___chunk_status",
-    # Assignment
+    # Assignment (store) + access control (store + manifest)
     "knowledge_base___assign_to_agent",
     "knowledge_base___list_assignments",
+    "knowledge_base___grant_access",
+    "knowledge_base___access_matrix",
     # Catalog
     "knowledge_base___get_catalog",
     # File ingestion (from vault roots)

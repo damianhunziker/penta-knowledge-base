@@ -123,6 +123,8 @@ class KnowledgeBaseProvider:
             knowledge_base___chunk_status,
             knowledge_base___assign_to_agent,
             knowledge_base___list_assignments,
+            knowledge_base___grant_access,
+            knowledge_base___access_matrix,
             knowledge_base___get_catalog,
         )
         from langgraph_crew_knowledge_base.ingest import (
@@ -146,9 +148,11 @@ class KnowledgeBaseProvider:
             # Chunking
             knowledge_base___chunk_document,
             knowledge_base___chunk_status,
-            # Assignment
+            # Assignment + access control
             knowledge_base___assign_to_agent,
             knowledge_base___list_assignments,
+            knowledge_base___grant_access,
+            knowledge_base___access_matrix,
             # Catalog
             knowledge_base___get_catalog,
             # File ingestion

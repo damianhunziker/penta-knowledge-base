@@ -75,6 +75,9 @@ def _assigned_titles_for(agent_id: str, state: Dict[str, Any]) -> List[str]:
     try:
         from langgraph_crew_knowledge_base.assignments import books_for_agent
 
+        # Ladder-aware: deployment ∪ this customer ∪ this project. The active
+        # scope comes from access_scope, so a run in another project does not
+        # inherit a project-level grant.
         return books_for_agent(agent_id)
     except Exception:  # noqa: BLE001 - assignment is optional
         logger.debug("[KNOWLEDGE_DISCOVERY] assignment lookup failed", exc_info=True)

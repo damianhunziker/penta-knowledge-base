@@ -42,7 +42,9 @@ knowledge_base:corpus/book-id/chapter#s:section  # section
 | `list` | Browse by corpus/tier |
 | `recommend_titles` | Get suggestions by topic |
 | `ingest_from_root` | Add MD/PDF from vault |
-| `assign_to_agent` | Give agent access to titles |
+| `assign_to_agent` | Give agent access to titles (store only) |
+| `grant_access` | Give access AND declare it at the chosen scope |
+| `access_matrix` | Show who may read what, and at which scope |
 
 ## Ingestion
 
@@ -60,12 +62,54 @@ categories: [topic]
 
 PDF: uses Docling extraction (background job).
 
-## Assignment
+## Assignment and access scope
 
-Assign titles to agents as training memory:
+An assignment is "this agent always has these titles in scope". It is stored
+with a **scope**, because a title given to an agent in one project must not
+silently follow that agent into every other project.
+
+| scope | who gets it | declared in |
+|-------|-------------|-------------|
+| `project` (default) | one project | `<project>/agents/<agent>.md` |
+| `client` | every project of one customer | `<customer>/agents/<agent>.md` |
+| `deployment` | every customer | `custom/agents/<agent>.md` |
+
+A run sees `deployment` ∪ its customer ∪ its project. Narrow never leaks wide.
+
+Decide the scope BEFORE granting: ask who should get the title. The safe
+default is `project`. `client` and `deployment` affect other scopes than the
+one you are in, so they need an explicit instruction —
+`authorized_by="user"` (or `"planner"`) plus `authorization_note` — otherwise
+ask the human first.
+
 ```
-knowledge_base___assign_to_agent("developer", book_ids=["meadows-2008"])
+# project only (default)
+tool_registry___system_request(tool_name="knowledge_base___grant_access",
+    arguments={"agent_id": "project_manager_agent", "scope": "project",
+               "titles": ["meadows-2008"]})
+
+# whole customer — only when the user ordered it
+tool_registry___system_request(tool_name="knowledge_base___grant_access",
+    arguments={"agent_id": "project_manager_agent", "scope": "client",
+               "titles": ["meadows-2008"], "authorized_by": "user",
+               "authorization_note": "User: all Acme projects use this book"})
+
+# every customer — only when the user ordered it
+tool_registry___system_request(tool_name="knowledge_base___grant_access",
+    arguments={"agent_id": "project_manager_agent", "scope": "deployment",
+               "titles": ["meadows-2008"], "authorized_by": "user",
+               "authorization_note": "User: make it generally available"})
 ```
+
+`grant_access` writes both halves of the decision: the store row (what the
+agent may read now) and the manifest at that level (the durable declaration).
+The manifest merge keeps a hand-written description, body and other
+`x-penta` keys — it only touches `knowledge_base`.
+
+`access_matrix` is the same table, read: every grant per agent, per scope, the
+database path and where each scope is declared on disk.
+
+`assign_to_agent` still works and writes only the store row.
 
 Agent YAML:
 ```yaml
