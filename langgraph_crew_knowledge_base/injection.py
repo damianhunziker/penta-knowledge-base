@@ -125,6 +125,7 @@ def knowledge_mid_run_injection(state: Dict[str, Any]) -> Dict[str, Any] | None:
     """
     settings = load_settings()
     if not settings.mid_run_enabled:
+        logger.debug("[KNOWLEDGE_INJECTION] Mid-run disabled")
         return None
 
     messages = state.get("messages") or []
@@ -134,10 +135,14 @@ def knowledge_mid_run_injection(state: Dict[str, Any]) -> Dict[str, Any] | None:
         if state.get(KEY_BASELINE) is None:
             state[KEY_BASELINE] = 0
             state[KEY_FIRED] = 0
+            logger.debug("[KNOWLEDGE_INJECTION] First call, empty history - baseline=0")
         return None
 
     current = _tool_call_count(messages)
     baseline = state.get(KEY_BASELINE)
+    logger.debug("[KNOWLEDGE_INJECTION] Tool calls: current=%s, baseline=%s, delta=%s, threshold=%s",
+                current, baseline, (current - (baseline or 0)) if baseline else "N/A",
+                settings.inject_after_tools)
     if baseline is None:
         # First entry of the run: start counting from here.
         #
@@ -194,6 +199,9 @@ def knowledge_mid_run_injection(state: Dict[str, Any]) -> Dict[str, Any] | None:
         _chunk_count = sum(
             1 for line in block.splitlines() if line.startswith("↳ read section")
         )
+        # Debug: always print to verify the hook is running
+        logger.info("[KNOWLEDGE_INJECTION] Mid-run block built: %s chunks, %s chars",
+                   _chunk_count, len(block))
         display_knowledge_injection(
             kind="mid-run",
             chunks=_chunk_count,
@@ -201,7 +209,8 @@ def knowledge_mid_run_injection(state: Dict[str, Any]) -> Dict[str, Any] | None:
             body=block,
             refs=refs,
         )
-    except Exception:  # noqa: BLE001 - display only
+    except Exception as e:  # noqa: BLE001 - display only
+        logger.warning("[KNOWLEDGE_INJECTION] display_knowledge_injection failed: %s", e)
         pass
 
     return {"llm_input_messages": list(messages) + [_runtime_reminder(block)]}
