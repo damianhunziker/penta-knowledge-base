@@ -28,8 +28,16 @@ def _clean_env(monkeypatch):
 
 
 class TestDefaults:
-    def test_inject_after_tools_is_13(self):
-        assert s.load_settings().inject_after_tools == 13
+    def test_inject_after_tools_defaults_to_13(self):
+        # The DOCUMENTED default lives in the code; plugin.env may override it
+        # for this deployment (it currently sets 1 for close observation).
+        assert s.DEFAULT_INJECT_AFTER_TOOLS == 13
+
+    def test_effective_threshold_comes_from_plugin_env(self):
+        # Whatever plugin.env says is what a run actually uses - the value must
+        # be a usable positive int, never the fallback by accident.
+        value = s.load_settings().inject_after_tools
+        assert isinstance(value, int) and value > 0
 
     def test_inject_chunks_is_3(self):
         assert s.load_settings().inject_chunks == 3

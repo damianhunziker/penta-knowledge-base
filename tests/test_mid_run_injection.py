@@ -6,6 +6,8 @@ The hook fires before every LLM call and injects a knowledge block once
 injection. These tests pin the counting, the caps and the message shape.
 """
 
+import re
+
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
@@ -79,13 +81,25 @@ class TestCounting:
         assert fake_block["n"] == 1
         assert state[inj.KEY_FIRED] == 1
 
-    def test_default_threshold_is_13(self, fake_block):
+    def test_default_threshold_is_13(self, fake_block, monkeypatch):
+        # Pin the threshold explicitly so the test is independent of the local
+        # plugin.env (a deployment may set 1 for close observation).
+        monkeypatch.setenv("KNOWLEDGE_INJECT_AFTER_TOOLS", "13")
         state = {"messages": _turns(0)}
         inj.knowledge_mid_run_injection(state)
         state["messages"] = _turns(12)
         assert inj.knowledge_mid_run_injection(state) is None
         state["messages"] = _turns(13)
         assert inj.knowledge_mid_run_injection(state) is not None
+
+    def test_threshold_one_fires_after_a_single_tool_call(self, fake_block, monkeypatch):
+        monkeypatch.setenv("KNOWLEDGE_INJECT_AFTER_TOOLS", "1")
+        state = {"messages": _turns(0)}
+        assert inj.knowledge_mid_run_injection(state) is None
+        state["messages"] = _turns(1)
+        out = inj.knowledge_mid_run_injection(state)
+        assert out is not None
+        assert state[inj.KEY_FIRED] == 1
 
     def test_second_fire_needs_another_window(self, fake_block, monkeypatch):
         monkeypatch.setenv("KNOWLEDGE_INJECT_AFTER_TOOLS", "13")
@@ -178,3 +192,71 @@ class TestMessageShape:
         assert state[inj.KEY_BASELINE] is None
         assert state[inj.KEY_FIRED] == 0
         assert state[inj.KEY_REFS] == []
+
+
+class TestDebugDisplay:
+    """F9 (memory debug) decides how much of the KB block reaches the CLI.
+
+    The operator's switch has to work at BOTH injection points — the mid-run
+    hook here and the task-start report in the executor. This class pins the
+    mid-run one: the hook must call the display, and the display must honour
+    the flag.
+    """
+
+    @staticmethod
+    def _fire(monkeypatch, fake_block):
+        monkeypatch.setenv("KNOWLEDGE_INJECT_AFTER_TOOLS", "1")
+        state = {"messages": _turns(0)}
+        inj.knowledge_mid_run_injection(state)
+        state["messages"] = _turns(1)
+        return inj.knowledge_mid_run_injection(state)
+
+    def test_debug_on_prints_the_full_block(self, monkeypatch, fake_block, capsys):
+        from app.core.global_state import set_memory_debug_mode
+
+        set_memory_debug_mode(True)
+        try:
+            assert self._fire(monkeypatch, fake_block) is not None
+        finally:
+            set_memory_debug_mode(False)
+        out = re.sub(r"\x1b\[[0-9;]*m", "", capsys.readouterr().out)
+        assert "KNOWLEDGE BASE" in out
+        # The passage text itself, not just a size line.
+        assert "chunk #1" in out
+        assert "read section" in out
+
+    def test_debug_off_prints_only_a_summary(self, monkeypatch, fake_block, capsys):
+        from app.core.global_state import set_memory_debug_mode
+
+        set_memory_debug_mode(False)
+        assert self._fire(monkeypatch, fake_block) is not None
+        out = re.sub(r"\x1b\[[0-9;]*m", "", capsys.readouterr().out)
+        assert "Knowledge:" in out
+        # No passage body leaks through.
+        assert "chunk #1" not in out
+        assert "KNOWLEDGE BASE\n" not in out
+
+    def test_hook_still_returns_the_block_when_debug_is_off(
+        self, monkeypatch, fake_block
+    ):
+        """Display is a side channel: the prompt gets the block either way."""
+        from app.core.global_state import set_memory_debug_mode
+
+        set_memory_debug_mode(False)
+        out = self._fire(monkeypatch, fake_block)
+        assert out is not None
+        assert "KNOWLEDGE BASE INFO" in out["llm_input_messages"][-1].content
+
+    def test_display_failure_never_breaks_the_injection(
+        self, monkeypatch, fake_block
+    ):
+        """A broken console must not cost the model its material."""
+        import app.core.cli_styling as styling
+
+        def _boom(*a, **kw):
+            raise RuntimeError("no console")
+
+        monkeypatch.setattr(styling, "display_knowledge_injection", _boom)
+        out = self._fire(monkeypatch, fake_block)
+        assert out is not None
+        assert "KNOWLEDGE BASE INFO" in out["llm_input_messages"][-1].content
