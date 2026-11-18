@@ -166,6 +166,7 @@ class KnowledgeSettings:
     min_score: float = DEFAULT_MIN_SCORE
     budget_tokens: int = DEFAULT_BUDGET_TOKENS
     disabled: bool = False
+    enabled_by_default: bool = False
 
     @property
     def mid_run_enabled(self) -> bool:
@@ -187,6 +188,7 @@ def load_settings() -> KnowledgeSettings:
             "KNOWLEDGE_INJECT_BUDGET_TOKENS", DEFAULT_BUDGET_TOKENS
         ),
         disabled=_bool("DISABLE_KNOWLEDGE_DISCOVERY", False),
+        enabled_by_default=_bool("ENABLE_KNOWLEDGE_DISCOVERY_DEFAULT", False),
     )
 
 

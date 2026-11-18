@@ -90,6 +90,20 @@ def _knowledge_base_disabled() -> bool:
     )
 
 
+def _knowledge_discovery_enabled_by_default() -> bool:
+    """True when knowledge discovery should run for every task unless explicitly disabled."""
+    try:
+        from langgraph_crew_knowledge_base.settings import load_settings
+
+        return load_settings().enabled_by_default
+    except Exception:  # noqa: BLE001
+        return os.getenv("ENABLE_KNOWLEDGE_DISCOVERY_DEFAULT", "false").lower() in (
+            "true",
+            "1",
+            "yes",
+        )
+
+
 class KnowledgeDiscoveryNode(NodeAgent):
     """
     Knowledge Discovery Node - discovers relevant knowledge.
@@ -174,6 +188,13 @@ class KnowledgeDiscoveryNode(NodeAgent):
         
         # Check if knowledge discovery is enabled
         knowledge_discovery_enabled = state.get("knowledge_discovery_enabled", False)
+        
+        # Check if enabled by default (new: can be turned on via env for every task)
+        if not knowledge_discovery_enabled and _knowledge_discovery_enabled_by_default():
+            knowledge_discovery_enabled = True
+            state["knowledge_discovery_enabled"] = True
+            if self.verbose:
+                print("📚 Knowledge discovery enabled by default (ENABLE_KNOWLEDGE_DISCOVERY_DEFAULT=true)")
         
         # Get current task for completion tracking
         current_task = self._get_current_task(state)
