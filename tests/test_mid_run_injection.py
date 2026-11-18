@@ -50,6 +50,34 @@ def fake_block(monkeypatch):
     return calls
 
 
+def _step(state, turns=None):
+    """One model call: run the hook and APPLY its returned delta.
+
+    This mirrors ``PreModelHooksMiddleware``: the hook gets a COPY of the state
+    and only the dict it RETURNS is persisted (through a ``Command``). A test
+    that mutates ``state`` and expects persistence would be pinning exactly the
+    bug this contract prevents.
+    """
+    if turns is not None:
+        state["messages"] = _turns(turns)
+    out = inj.knowledge_mid_run_injection({**state})
+    if isinstance(out, dict):
+        for key, value in out.items():
+            if key != "llm_input_messages":
+                state[key] = value
+    return out
+
+
+def _injected(out) -> bool:
+    """True when a hook result actually injects a block.
+
+    The hook may return a COUNTER-ONLY delta (arming the baseline) without
+    injecting anything, so "did it inject" is the presence of
+    ``llm_input_messages`` — not ``out is not None``.
+    """
+    return bool(isinstance(out, dict) and out.get("llm_input_messages"))
+
+
 def _turns(n):
     """n AI messages that each requested a tool (= n completed turns)."""
     return [AIMessage(content="", tool_calls=[{"name": "t", "args": {}, "id": str(i)}])
@@ -59,24 +87,22 @@ def _turns(n):
 class TestCounting:
     def test_first_call_arms_the_counter(self, fake_block):
         state = {"messages": _turns(0)}
-        assert inj.knowledge_mid_run_injection(state) is None
+        _step(state)
         assert state[inj.KEY_BASELINE] == 0
         assert state[inj.KEY_FIRED] == 0
 
     def test_does_not_fire_before_threshold(self, fake_block, monkeypatch):
         monkeypatch.setenv("KNOWLEDGE_INJECT_AFTER_TOOLS", "13")
         state = {"messages": _turns(0)}
-        inj.knowledge_mid_run_injection(state)  # arm
-        state["messages"] = _turns(12)
-        assert inj.knowledge_mid_run_injection(state) is None
+        _step(state)  # arm
+        assert not _injected(_step(state, 12))
         assert fake_block["n"] == 0
 
     def test_fires_at_threshold(self, fake_block, monkeypatch):
         monkeypatch.setenv("KNOWLEDGE_INJECT_AFTER_TOOLS", "13")
         state = {"messages": _turns(0)}
-        inj.knowledge_mid_run_injection(state)  # arm
-        state["messages"] = _turns(13)
-        out = inj.knowledge_mid_run_injection(state)
+        _step(state)  # arm
+        out = _step(state, 13)
         assert out is not None
         assert fake_block["n"] == 1
         assert state[inj.KEY_FIRED] == 1
@@ -86,33 +112,24 @@ class TestCounting:
         # plugin.env (a deployment may set 1 for close observation).
         monkeypatch.setenv("KNOWLEDGE_INJECT_AFTER_TOOLS", "13")
         state = {"messages": _turns(0)}
-        inj.knowledge_mid_run_injection(state)
-        state["messages"] = _turns(12)
-        assert inj.knowledge_mid_run_injection(state) is None
-        state["messages"] = _turns(13)
-        assert inj.knowledge_mid_run_injection(state) is not None
+        assert not _injected(_step(state))
+        assert not _injected(_step(state, 12))
+        assert _injected(_step(state, 13))
 
     def test_threshold_one_fires_after_a_single_tool_call(self, fake_block, monkeypatch):
         monkeypatch.setenv("KNOWLEDGE_INJECT_AFTER_TOOLS", "1")
         state = {"messages": _turns(0)}
-        assert inj.knowledge_mid_run_injection(state) is None
-        state["messages"] = _turns(1)
-        out = inj.knowledge_mid_run_injection(state)
-        assert out is not None
+        assert not _injected(_step(state))
+        assert _injected(_step(state, 1))
         assert state[inj.KEY_FIRED] == 1
 
     def test_second_fire_needs_another_window(self, fake_block, monkeypatch):
         monkeypatch.setenv("KNOWLEDGE_INJECT_AFTER_TOOLS", "13")
         state = {"messages": _turns(0)}
-        inj.knowledge_mid_run_injection(state)
-        state["messages"] = _turns(13)
-        inj.knowledge_mid_run_injection(state)
-
-        state["messages"] = _turns(20)  # only 7 more
-        assert inj.knowledge_mid_run_injection(state) is None
-
-        state["messages"] = _turns(26)  # 13 more
-        assert inj.knowledge_mid_run_injection(state) is not None
+        _step(state)
+        assert _injected(_step(state, 13))
+        assert not _injected(_step(state, 20))   # only 7 more
+        assert _injected(_step(state, 26))       # 13 more
         assert state[inj.KEY_FIRED] == 2
 
 
@@ -121,36 +138,32 @@ class TestCaps:
         monkeypatch.setenv("KNOWLEDGE_INJECT_AFTER_TOOLS", "1")
         monkeypatch.setenv("KNOWLEDGE_INJECT_MAX_PER_RUN", "2")
         state = {"messages": _turns(0)}
-        inj.knowledge_mid_run_injection(state)  # arm
+        _step(state)  # arm
         fired = 0
         for turns in range(1, 10):
-            state["messages"] = _turns(turns)
-            if inj.knowledge_mid_run_injection(state):
+            if _step(state, turns):
                 fired += 1
         assert fired == 2, f"fired {fired}x, max_per_run is 2"
 
     def test_zero_threshold_disables(self, fake_block, monkeypatch):
         monkeypatch.setenv("KNOWLEDGE_INJECT_AFTER_TOOLS", "0")
         state = {"messages": _turns(0)}
-        inj.knowledge_mid_run_injection(state)
-        state["messages"] = _turns(500)
-        assert inj.knowledge_mid_run_injection(state) is None
+        _step(state)
+        assert not _injected(_step(state, 500))
         assert fake_block["n"] == 0
 
     def test_disabled_flag(self, fake_block, monkeypatch):
         monkeypatch.setenv("DISABLE_KNOWLEDGE_DISCOVERY", "true")
         state = {"messages": _turns(0)}
-        inj.knowledge_mid_run_injection(state)
-        state["messages"] = _turns(99)
-        assert inj.knowledge_mid_run_injection(state) is None
+        _step(state)
+        assert not _injected(_step(state, 99))
 
     def test_empty_block_does_not_burn_an_injection(self, fake_block, monkeypatch):
         monkeypatch.setenv("KNOWLEDGE_INJECT_AFTER_TOOLS", "2")
         state = {"messages": _turns(0)}
-        inj.knowledge_mid_run_injection(state)
+        _step(state)
         fake_block["empty"] = True
-        state["messages"] = _turns(2)
-        assert inj.knowledge_mid_run_injection(state) is None
+        assert not _injected(_step(state, 2))
         assert state[inj.KEY_FIRED] == 0
 
 
@@ -158,9 +171,8 @@ class TestMessageShape:
     def test_block_is_a_tail_safe_human_message(self, fake_block, monkeypatch):
         monkeypatch.setenv("KNOWLEDGE_INJECT_AFTER_TOOLS", "1")
         state = {"messages": _turns(0)}
-        inj.knowledge_mid_run_injection(state)
-        state["messages"] = _turns(1)
-        out = inj.knowledge_mid_run_injection(state)
+        _step(state)
+        out = _step(state, 1)
 
         msgs = out["llm_input_messages"]
         assert isinstance(msgs[-1], HumanMessage)
@@ -171,19 +183,17 @@ class TestMessageShape:
         """The block goes to the prompt only — state['messages'] is untouched."""
         monkeypatch.setenv("KNOWLEDGE_INJECT_AFTER_TOOLS", "1")
         state = {"messages": _turns(0)}
-        inj.knowledge_mid_run_injection(state)
-        state["messages"] = _turns(1)
-        before = list(state["messages"])
-        out = inj.knowledge_mid_run_injection(state)
+        _step(state)
+        before = _turns(1)
+        out = _step(state, 1)
         assert out is not None
         assert state["messages"] == before
 
     def test_injected_refs_are_recorded(self, fake_block, monkeypatch):
         monkeypatch.setenv("KNOWLEDGE_INJECT_AFTER_TOOLS", "1")
         state = {"messages": _turns(0)}
-        inj.knowledge_mid_run_injection(state)
-        state["messages"] = _turns(1)
-        inj.knowledge_mid_run_injection(state)
+        _step(state)
+        _step(state, 1)
         assert "knowledge_base:academic/x/ch1" in state[inj.KEY_REFS]
 
     def test_reset_clears_counters(self):
@@ -207,9 +217,8 @@ class TestDebugDisplay:
     def _fire(monkeypatch, fake_block):
         monkeypatch.setenv("KNOWLEDGE_INJECT_AFTER_TOOLS", "1")
         state = {"messages": _turns(0)}
-        inj.knowledge_mid_run_injection(state)
-        state["messages"] = _turns(1)
-        return inj.knowledge_mid_run_injection(state)
+        _step(state)
+        return _step(state, 1)
 
     def test_debug_on_prints_the_full_block(self, monkeypatch, fake_block, capsys):
         from app.core.global_state import set_memory_debug_mode

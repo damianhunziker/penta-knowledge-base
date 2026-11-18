@@ -120,8 +120,12 @@ def reset_run_counters(state: Dict[str, Any]) -> None:
 def knowledge_mid_run_injection(state: Dict[str, Any]) -> Dict[str, Any] | None:
     """``pre_model`` hook: inject a knowledge block after N tool calls.
 
-    Returns ``None`` when nothing is injected, so the hook chain simply
-    continues with the previous result.
+    Returns a state delta — never ``None`` once anything changed. The hook
+    contract is RETURN-based: ``state`` is a merged COPY handed to the hook
+    chain, so mutating ``state[...]`` alone is discarded and the counters would
+    read back as ``None`` on the next model call (the injection then either
+    never fires, or fires on every single turn). Non-message keys returned here
+    are persisted by ``PreModelHooksMiddleware`` through a ``Command``.
     """
     settings = load_settings()
     if not settings.mid_run_enabled:
@@ -133,9 +137,8 @@ def knowledge_mid_run_injection(state: Dict[str, Any]) -> Dict[str, Any] | None:
         # Nothing to count yet, but a run that starts with an empty history
         # must still arm the counter on its first real turn.
         if state.get(KEY_BASELINE) is None:
-            state[KEY_BASELINE] = 0
-            state[KEY_FIRED] = 0
             logger.debug("[KNOWLEDGE_INJECTION] First call, empty history - baseline=0")
+            return {KEY_BASELINE: 0, KEY_FIRED: 0}
         return None
 
     current = _tool_call_count(messages)
@@ -150,15 +153,12 @@ def knowledge_mid_run_injection(state: Dict[str, Any]) -> Dict[str, Any] | None:
         # best-effort. This branch is what actually guarantees a clean start:
         # a new agent run begins with no baseline in its state, so the first
         # LLM call arms the counter and the injection fires N turns later.
-        state[KEY_BASELINE] = current
-        state[KEY_FIRED] = 0
-        return None
+        return {KEY_BASELINE: current, KEY_FIRED: 0}
 
     try:
         baseline = int(baseline)
     except (TypeError, ValueError):
-        state[KEY_BASELINE] = current
-        return None
+        return {KEY_BASELINE: current}
 
     delta = current - baseline
     if delta < settings.inject_after_tools:
@@ -174,16 +174,14 @@ def knowledge_mid_run_injection(state: Dict[str, Any]) -> Dict[str, Any] | None:
         settings=settings,
     )
     if not block:
-        # Nothing to inject: keep the baseline so we retry after the next turn
+        # Nothing to inject: move the baseline so we retry after the next turn
         # instead of hammering the corpus on every single LLM call.
-        state[KEY_BASELINE] = current - settings.inject_after_tools + 1
-        return None
+        return {KEY_BASELINE: current - settings.inject_after_tools + 1}
 
     # Count the threshold from the CURRENT turn, so the next injection comes
     # after another full window of tool calls.
-    state[KEY_BASELINE] = current
-    state[KEY_FIRED] = fired + 1
-
+    # Count the threshold from the CURRENT turn, so the next injection comes
+    # after another full window of tool calls.
     refs = list(state.get(KEY_REFS) or [])
     for line in block.splitlines():
         if "kb_ref=\"" in line:
@@ -191,7 +189,6 @@ def knowledge_mid_run_injection(state: Dict[str, Any]) -> Dict[str, Any] | None:
                 refs.append(line.split('kb_ref="', 1)[1].split('"', 1)[0])
             except IndexError:
                 continue
-    state[KEY_REFS] = refs
 
     try:
         from app.core.cli_styling import display_knowledge_injection
@@ -211,9 +208,15 @@ def knowledge_mid_run_injection(state: Dict[str, Any]) -> Dict[str, Any] | None:
         )
     except Exception as e:  # noqa: BLE001 - display only
         logger.warning("[KNOWLEDGE_INJECTION] display_knowledge_injection failed: %s", e)
-        pass
 
-    return {"llm_input_messages": list(messages) + [_runtime_reminder(block)]}
+    return {
+        "llm_input_messages": list(messages) + [_runtime_reminder(block)],
+        # Counters MUST travel with the delta: the hook receives a copy of the
+        # state, so a bare assignment would be thrown away.
+        KEY_BASELINE: current,
+        KEY_FIRED: fired + 1,
+        KEY_REFS: refs,
+    }
 
 
 __all__ = [
