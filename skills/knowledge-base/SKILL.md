@@ -46,6 +46,14 @@ knowledge_base:corpus/book-id/chapter#s:section  # section
 | `grant_access` | Give access AND declare it at the chosen scope |
 | `access_matrix` | Show who may read what, and at which scope |
 
+## Managing the corpus
+
+`python plugins/knowledge-base/scripts/knowledge_manager.py` (or `/knowledge` in
+the chat) lists bases and books, flags books that hold only metadata or bullets
+instead of real text, shows every agent binding per scope, and shows how the
+bindings differ per customer/project. It assigns and removes bindings through
+the same store the tools use.
+
 ## Ingestion
 
 Markdown with frontmatter:

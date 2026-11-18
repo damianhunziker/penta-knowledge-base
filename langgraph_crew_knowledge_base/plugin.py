@@ -23,6 +23,7 @@ from langgraph_crew_knowledge_base.injection import (
     knowledge_mid_run_injection,
     reset_run_counters,
 )
+from langgraph_crew_knowledge_base.manager_cli import knowledge_cli as _knowledge_cli
 from langgraph_crew_knowledge_base.provider import KnowledgeBaseProvider
 from langgraph_crew_knowledge_base.settings import load_settings
 
@@ -65,6 +66,15 @@ class KnowledgeBasePlugin(Plugin):
         if tools:
             ctx.register_tools(tools, category="knowledge_base", tool_type="plugin")
             ctx.logger.info(f"Registered {len(tools)} knowledge base tools")
+
+        # ── Manager command ──────────────────────────────────────────────
+        # `/knowledge` from the chat CLI: the same views and edits as
+        # ``scripts/knowledge_manager.py``, in one place (see manager_cli.py).
+        ctx.register_cli_command(
+            "knowledge",
+            _knowledge_cli,
+            help_text="Knowledge bases, agent bindings and namespaces (list/assign/unassign)",
+        )
 
         # ── Mid-run injection ────────────────────────────────────────────
         # Runs before every LLM call inside a ReAct loop and injects a

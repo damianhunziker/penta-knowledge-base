@@ -14,3 +14,5 @@ This plugin owns the knowledge corpus (books, academic literature). Its rules ap
 - **Injected blocks are tail-safe.** They go into `llm_input_messages` as a `runtime_reminder` HumanMessage, never into `messages` — they must not repeat in later turns.
 - **Grants carry a scope.** `project` (default) · `client` (one customer) · `deployment` (every customer). A run sees deployment ∪ its customer ∪ its project — narrow never leaks wide. `client`/`deployment` need `authorized_by="user"` + a note, otherwise ask the human.
 - **`grant_access` writes both halves**: the store row and the manifest at that level (merged, never replaced). `access_matrix` shows who may read what, and where.
+- **Managing what exists:** `scripts/knowledge_manager.py` (or `/knowledge` in the chat) browses bases, books, bindings and namespaces, and edits them. It is the same write path as the tools — never a second implementation.
+- **A base = a corpus.** An agent is given a base, not a chunk. A book whose chunks are frontmatter or bullets is marked `!` (a summary, not the book) and should not be bound.

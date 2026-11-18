@@ -104,12 +104,43 @@ def _settings():
         return None
 
 
+def _qdrant_api_key() -> str:
+    """The Qdrant API key, from the environment or the settings object.
+
+    ``config.settings`` does not always expose the key (the field name differs
+    between deployments), and a missing key is what the client reports as a
+    bare ``401`` — on the host that made every other instance look unusable and
+    the plugin fall back to a *different* Qdrant that answered without a key.
+    """
+    for name in ("QDRANT_API_KEY", "QDRANT__SERVICE__API_KEY"):
+        value = os.getenv(name)
+        if value:
+            return value.strip()
+    settings = _settings()
+    if settings is not None:
+        for attr in ("qdrant_api_key", "QDRANT_API_KEY"):
+            value = getattr(settings, attr, None)
+            if value:
+                return str(value).strip()
+        # pydantic Settings keep the raw env in ``model_extra`` when the model
+        # does not declare the field explicitly.
+        extra = getattr(settings, "model_extra", None) or {}
+        value = extra.get("QDRANT_API_KEY") or extra.get("qdrant_api_key")
+        if value:
+            return str(value).strip()
+    return ""
+
+
 def _qdrant():
     """Lazy Qdrant client (``None`` when no reachable instance exists).
 
-    The client is bound to the first URL that answers a health probe, so a
-    later search call does not fail because the process guessed the wrong
-    address.
+    The client is bound to the first URL that answers a health probe **and**
+    knows this plugin's collection. Probing the health endpoint alone is not
+    enough: on a workstation ``127.0.0.1:6333`` is often a *different* Qdrant
+    instance that answers happily but has no ``knowledge_base_chunks``, so the
+    corpus looked empty while the real one (behind ``QDRANT_HOST_URL``) was
+    never reached. An instance without the collection is still remembered as a
+    last resort, so a fresh deployment can create it on the first ingest.
     """
     global _qdrant_client
     if _qdrant_client is not None:
@@ -120,18 +151,36 @@ def _qdrant():
         logger.debug("[KNOWLEDGE_BASE] qdrant-client missing: %s", exc)
         return None
 
-    api_key = os.getenv("QDRANT_API_KEY") or getattr(_settings(), "qdrant_api_key", None)
+    api_key = _qdrant_api_key()
+    fallback = None
     for url in _qdrant_urls():
         try:
             client = QdrantClient(
                 url=url, api_key=api_key or None, timeout=5, check_compatibility=False
             )
-            client.get_collections()  # probe
-            _qdrant_client = client
-            logger.debug("[KNOWLEDGE_BASE] Qdrant at %s", url)
-            return client
+            client.get_collections()  # probe reachability
+            try:
+                has_collection = client.collection_exists(KB_COLLECTION)
+            except Exception:  # noqa: BLE001 - older client / permission detail
+                has_collection = False
+            if has_collection:
+                _qdrant_client = client
+                logger.debug("[KNOWLEDGE_BASE] Qdrant at %s (has %s)", url, KB_COLLECTION)
+                return client
+            if fallback is None:
+                fallback = (url, client)
+                logger.debug(
+                    "[KNOWLEDGE_BASE] Qdrant at %s answers but has no %s; "
+                    "trying the next candidate", url, KB_COLLECTION,
+                )
         except Exception as exc:  # noqa: BLE001 - try the next candidate
             logger.debug("[KNOWLEDGE_BASE] Qdrant %s unreachable: %s", url, exc)
+
+    if fallback is not None:
+        url, client = fallback
+        logger.debug("[KNOWLEDGE_BASE] no instance has %s; using %s", KB_COLLECTION, url)
+        _qdrant_client = client
+        return client
     return None
 
 
