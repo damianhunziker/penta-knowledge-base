@@ -770,6 +770,58 @@ def knowledge_base___list_assignments(
     }, indent=2)
 
 
+def _build_catalog_from_qdrant() -> Dict[str, Any]:
+    """Build the catalog by scanning the indexed chunks in Qdrant."""
+    client = _qdrant()
+    if client is None:
+        return {"corpora": {}, "total_books": 0, "total_chunks": 0}
+    try:
+        if not client.collection_exists(KB_COLLECTION):
+            return {"corpora": {}, "total_books": 0, "total_chunks": 0}
+        
+        # Scroll through all points to aggregate books
+        points, _ = client.scroll(KB_COLLECTION, limit=1000, with_payload=True)
+        
+        corpora: Dict[str, Dict[str, Any]] = {}
+        book_chunks: Dict[str, int] = {}
+        
+        for p in points:
+            payload = p.payload or {}
+            book_id = payload.get("book_id") or "unknown"
+            corpus = payload.get("corpus") or "default"
+            
+            # Track chunk count
+            book_chunks[book_id] = book_chunks.get(book_id, 0) + 1
+            
+            # Build corpus entry
+            if corpus not in corpora:
+                corpora[corpus] = {
+                    "name": corpus.replace("-", " ").title(),
+                    "books": {},
+                }
+            
+            # Build book entry (first chunk wins for metadata)
+            if book_id not in corpora[corpus]["books"]:
+                corpora[corpus]["books"][book_id] = {
+                    "title": payload.get("title") or book_id,
+                    "authors": payload.get("authors") or [],
+                    "year": payload.get("year"),
+                    "tier": payload.get("tier") or "standard",
+                    "categories": payload.get("categories") or [],
+                    "chunks": 0,
+                }
+            corpora[corpus]["books"][book_id]["chunks"] += 1
+        
+        return {
+            "corpora": corpora,
+            "total_books": sum(len(c["books"]) for c in corpora.values()),
+            "total_chunks": sum(book_chunks.values()),
+        }
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[KNOWLEDGE_BASE] catalog build failed: %s", exc)
+        return {"corpora": {}, "total_books": 0, "total_chunks": 0}
+
+
 def knowledge_base___get_catalog() -> str:
     """
     Get the full knowledge base catalog.
@@ -777,6 +829,12 @@ def knowledge_base___get_catalog() -> str:
     Returns:
         JSON string with catalog
     """
+    # Build from Qdrant (real data) first
+    catalog = _build_catalog_from_qdrant()
+    if catalog["total_chunks"] > 0:
+        return json.dumps(catalog, indent=2)
+    
+    # Fall back to mock catalog for demo purposes
     return json.dumps(_MOCK_CATALOG, indent=2)
 
 
