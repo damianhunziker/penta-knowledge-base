@@ -4,6 +4,7 @@
 Registers:
   * Provider ``knowledge_base`` (kind ``knowledge_base``)
   * Provider ``knowledge_discovery_node`` (executor loop)
+  * Provider ``flow`` (node for the workflow's handoff step)
   * Tools for search, read, chunk, assignment
   * ``pre_model`` hook: mid-run injection after N tool calls
   * ``run_start`` hook: resets the injection counters
@@ -26,8 +27,19 @@ from langgraph_crew_knowledge_base.provider import KnowledgeBaseProvider
 from langgraph_crew_knowledge_base.settings import load_settings
 
 
+class FlowProvider:
+    """Node provider for the workflow's handoff step."""
+
+    name = "flow"
+
+    def node(self):
+        from langgraph_crew_knowledge_base.flow import knowledge_discovery_handoff
+
+        return knowledge_discovery_handoff
+
+
 class KnowledgeBasePlugin(Plugin):
-    name = "knowledge_base"
+    name = "knowledge-base"
     version = "0.1.0"
     description = (
         "Knowledge base with BGE-M3 embeddings, hierarchical chunking, "
@@ -44,6 +56,9 @@ class KnowledgeBasePlugin(Plugin):
 
         # Register the node provider for the executor loop
         ctx.register_provider("knowledge_discovery_node", provider)
+
+        # Register the flow provider for the workflow's handoff step
+        ctx.register_provider("node", FlowProvider())
 
         # Register tools
         tools = provider.get_tools()
