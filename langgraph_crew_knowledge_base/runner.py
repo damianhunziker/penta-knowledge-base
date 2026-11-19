@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any, Dict, Iterable, List, Sequence
 
 from langgraph_crew_knowledge_base.render import Chunk, Reference, render_chunk
@@ -92,22 +93,58 @@ def _to_chunk(hit: Dict[str, Any]) -> Chunk | None:
 
 
 def _trim_to_budget(chunks: Sequence[Chunk], budget_tokens: int) -> List[Chunk]:
-    """Keep chunks until the rough token budget is spent.
+    """Fit ``chunks`` into ``budget_tokens`` while keeping all of them.
 
     A token is approximated as four characters — good enough for a ceiling and
     cheap enough to run on every injection.
+
+    The budget is split **per chunk**, not handed out first-come-first-served.
+    The old greedy version gave the whole budget to the first hit (a 3'300-char
+    Meggs page = 898 of 900 tokens) and dropped the rest, so a task configured
+    for ``KNOWLEDGE_TASK_CHUNKS=3`` received one passage and nothing said so.
+    Every requested chunk now appears, shortened at a paragraph boundary when
+    it has to be.
     """
-    if budget_tokens <= 0:
-        return list(chunks)
+    chunks = list(chunks)
+    if budget_tokens <= 0 or not chunks:
+        return chunks
+
+    share = max(200, budget_tokens // len(chunks))
     kept: List[Chunk] = []
-    used = 0
     for chunk in chunks:
-        cost = (len(chunk.text) + 300) // 4  # text + header/citation/invitation
-        if kept and used + cost > budget_tokens:
-            break
-        kept.append(chunk)
-        used += cost
+        cut = _cut_to_tokens(chunk, share)
+        if cut is not None:
+            kept.append(cut)
     return kept
+
+
+def _cut_to_tokens(chunk: Chunk, tokens: int) -> Chunk | None:
+    """Cut ``chunk.text`` at a paragraph boundary to fit ``tokens``.
+
+    Returns a new ``Chunk`` (the reference stays intact, so the invitation line
+    still opens the *whole* section), or ``None`` when even a short cut would
+    be meaningless.
+    """
+    limit = max(200, tokens * 4)
+    text = chunk.text.strip()
+    if len(text) <= limit:
+        return chunk
+    cut = text[:limit]
+    # Prefer a paragraph, then a sentence, then a word boundary.
+    for marker in ("\n\n", ". ", " "):
+        boundary = cut.rfind(marker)
+        if boundary > limit // 2:
+            cut = cut[: boundary + len(marker)]
+            break
+    cut = cut.rstrip()
+    if len(cut) < 200:
+        return None
+    return Chunk(
+        text=cut + "\n… (passage shortened to fit the token budget; read the "
+        'section with knowledge_base___read(kb_ref="…") for the full text)',
+        reference=chunk.reference,
+        score=chunk.score,
+    )
 
 
 def _seen_refs(state: Dict[str, Any] | None) -> set:
@@ -115,6 +152,51 @@ def _seen_refs(state: Dict[str, Any] | None) -> set:
     if not isinstance(state, dict):
         return set()
     return set(state.get("knowledge_injected_refs") or [])
+
+
+def _is_index_page(text: str) -> bool:
+    """True for a book's index/table-of-contents/bibliography page.
+
+    These pages match a topic search strongly (every term of the query appears
+    in them) but tell a model nothing: they are lists of page numbers or book
+    titles. Injected as "the passage for this task" they displace the real
+    content — exactly what happened with ``page 216`` of Wu ("Dynamic Diagrams'
+    interface design, 179 / interaction with, 172-174 / …") and with the Meggs
+    and Pettersson bibliographies.
+    """
+    lines = [ln.strip() for ln in str(text or "").splitlines() if ln.strip()]
+    if len(lines) < 5:
+        return False
+
+    # A. Index pages: a large share of lines end in a page reference
+    #    ("Dynamic Diagrams' interface design, 179", "interaction with, 172-174").
+    refs = sum(
+        1
+        for line in lines
+        if re.search(r"\d{1,3}(\s*[-\u2013]\s*\d{1,3})?\s*$", line)
+        and len(line) < 90
+    )
+    if refs / len(lines) >= 0.5:
+        return True
+
+    # B. Bibliographies / reference lists: many entries look like
+    #    "Author, A. & Author, B. (2007). Title. Publisher."
+    #    A bibliography is dense in years in parentheses and initials.
+    citations = sum(
+        1
+        for line in lines
+        if re.search(r"\(\d{4}[a-z]?\)", line) and re.search(r"\b[A-Z]\.\s", line)
+    )
+    if citations / len(lines) >= 0.35:
+        return True
+
+    # C. Table of contents: numbered headings without running prose.
+    numbered = sum(1 for line in lines if re.match(r"^(\d+(\.\d+)*\.?|[IVX]+\.)\s+\S", line))
+    words = sum(len(line.split()) for line in lines)
+    if numbered / len(lines) >= 0.5 and words / len(lines) < 8:
+        return True
+
+    return False
 
 
 def render_block(
@@ -157,8 +239,16 @@ def build_task_block(
     if not query:
         return ""
 
-    chunk_limit = count
-    chunks = _search(query, chunk_limit, settings)
+    # Over-fetch so dropping index pages still leaves `count` real passages.
+    chunks = _search(query, count * 3, settings)
+    usable = [c for c in chunks if not _is_index_page(c.text)]
+    if usable:
+        chunks = usable
+    else:
+        logger.debug(
+            "[KNOWLEDGE_BASE] every hit looked like an index page for %r", query
+        )
+    chunks = chunks[:count]
     chunks = _trim_to_budget(chunks, settings.budget_tokens)
     return render_block(
         chunks,

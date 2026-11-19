@@ -55,7 +55,9 @@ def fake_search(monkeypatch):
 class TestTaskBlock:
     def test_default_is_three_chunks(self, fake_search):
         block = runner.build_task_block({"id": "t1", "description": "systems thinking"})
-        assert fake_search["limit"] == 3
+        # The block over-fetches so index pages can be filtered out; what
+        # matters is how many passages are RENDERED.
+        assert fake_search["limit"] == 3 * 3
         assert block.startswith(runner.TASK_BLOCK_HEADER)
         assert block.count("↳ read section") == 3
 
@@ -63,13 +65,13 @@ class TestTaskBlock:
         block = runner.build_task_block(
             {"id": "t1", "description": "x", "knowledge_chunks": 5}
         )
-        assert fake_search["limit"] == 5
+        assert fake_search["limit"] == 5 * 3
         assert block.count("↳ read section") == 5
 
     def test_env_default(self, fake_search, monkeypatch):
         monkeypatch.setenv("KNOWLEDGE_TASK_CHUNKS", "2")
         block = runner.build_task_block({"id": "t1", "description": "x"})
-        assert fake_search["limit"] == 2
+        assert fake_search["limit"] == 2 * 3
         assert block.count("↳ read section") == 2
 
     def test_zero_chunks_gives_no_block(self, fake_search):
@@ -91,7 +93,7 @@ class TestTaskBlock:
         monkeypatch.setenv("KNOWLEDGE_INJECT_CHUNKS", "2")
         monkeypatch.setenv("KNOWLEDGE_TASK_CHUNKS", "1")
         runner.build_task_block({"id": "t1", "description": "x", "knowledge_chunks": 9})
-        assert fake_search["limit"] == 9
+        assert fake_search["limit"] == 9 * 3
 
 
 class TestMidRunBlock:
