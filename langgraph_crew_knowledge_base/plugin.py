@@ -17,12 +17,16 @@ All injection tuning comes from the environment — see
 :mod:`langgraph_crew_knowledge_base.settings`.
 """
 
+import os
+
 from app.core.plugin_api import Plugin, PluginContext
 
 from langgraph_crew_knowledge_base.injection import (
     knowledge_mid_run_injection,
     reset_run_counters,
 )
+import os
+
 from langgraph_crew_knowledge_base.manager_cli import knowledge_cli as _knowledge_cli
 from langgraph_crew_knowledge_base.provider import KnowledgeBaseProvider
 from langgraph_crew_knowledge_base.settings import load_settings
@@ -80,7 +84,14 @@ class KnowledgeBasePlugin(Plugin):
         # Runs before every LLM call inside a ReAct loop and injects a
         # knowledge block every KNOWLEDGE_INJECT_AFTER_TOOLS tool calls.
         settings = load_settings()
-        if not settings.disabled:
+        # The corpus is no longer injected by its own hook when the memory
+        # plugin's fusion hook is active: that hook asks the corpus AND the
+        # memory types with one query and ranks them together. Two hooks would
+        # inject the corpus twice and rank nothing against anything.
+        fused = str(os.getenv("MEMORY_FUSION_OWNS_MID_RUN", "true")).strip().lower() in (
+            "1", "true", "yes", "on"
+        )
+        if not settings.disabled and not fused:
             ctx.register_hook(
                 "pre_model",
                 knowledge_mid_run_injection,
