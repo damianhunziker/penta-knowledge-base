@@ -182,7 +182,13 @@ def split_markdown(content: str) -> List[Dict[str, Any]]:
             # The PDF converter emits "## Page 42" — a page marker, not a section.
             page_match = re.fullmatch(r"Page\s+(\d+)", title, re.IGNORECASE)
             if page_match:
+                # A page boundary ends a chunk. Without this flush all pages of a
+                # PDF collapse into the section above them (one huge chunk whose
+                # page_from is the last page), which is the opposite of what a
+                # reader opening a chunk needs.
+                flush()
                 page = int(page_match.group(1))
+                current = None
                 continue
 
             flush()
@@ -258,13 +264,49 @@ def index_markdown(
 ) -> Dict[str, Any]:
     """Chunk a markdown file, embed it and upsert it into Qdrant.
 
+    Thin wrapper over :func:`index_text` (which the PDF/EPUB path uses too).
+    """
+    path = Path(path)
+    content = path.read_text(encoding="utf-8")
+    return index_text(
+        client,
+        content,
+        book_id=book_id,
+        title=title,
+        corpus=corpus,
+        authors=authors,
+        year=year,
+        tier=tier,
+        categories=categories,
+        tags=tags,
+        source_ref=source_ref or str(path),
+    )
+
+
+def index_text(
+    client,
+    content: str,
+    *,
+    book_id: str,
+    title: str,
+    corpus: str,
+    authors: Optional[Iterable[str]] = None,
+    year: Optional[int] = None,
+    tier: str = "standard",
+    categories: Optional[Iterable[str]] = None,
+    tags: Optional[Iterable[str]] = None,
+    source_ref: str = "",
+) -> Dict[str, Any]:
+    """Chunk already-extracted text, embed it and upsert it into Qdrant.
+
+    The one indexing path: markdown files and PDFs/EPUBs (extracted to markdown
+    first, see :mod:`extract`) end up in exactly the same shape here.
+
     Existing points of the same ``book_id`` are removed first, so re-ingesting
-    a file replaces it instead of duplicating it.
+    replaces the book instead of duplicating it.
     """
     from qdrant_client import models as qm
 
-    path = Path(path)
-    content = path.read_text(encoding="utf-8")
     chunks = split_markdown(content)
     if not chunks:
         return {"status": "empty", "book_id": book_id, "chunks": 0}
@@ -301,7 +343,7 @@ def index_markdown(
             "chunk_index": chunk_index,
             "chunker_version": CHUNKER_VERSION,
             "embedding_model": EMBED_MODEL,
-            "source_ref": source_ref or str(path),
+            "source_ref": source_ref or "",
             "content_sha256": hashlib.sha256(
                 chunk["text"].encode("utf-8")
             ).hexdigest(),
@@ -367,5 +409,6 @@ __all__ = [
     "embed_texts",
     "ensure_collection",
     "index_markdown",
+    "index_text",
     "split_markdown",
 ]

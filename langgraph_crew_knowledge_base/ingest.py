@@ -587,17 +587,108 @@ def knowledge_base___ingest_from_root(
                 "error": str(e),
             })
     
-    # Process PDF/EPUB
-    elif chunking == "pdf":
-        # TODO: Implement Docling extraction
-        result.update({
-            "status": "queued" if background else "pending",
-            "title": title or Path(file_path).stem,
-            "message": f"PDF file queued for ingestion (Docling extraction pending)",
-            "note": "Full PDF extraction requires Docling installation",
-        })
-    
+    # Process PDF/EPUB: extract to markdown, then the SAME indexing path the
+    # markdown branch uses. There is no queue: a "queued" job with no worker
+    # looked like a slow ingest and silently never produced a chunk.
+    elif chunking in ("pdf", "epub"):
+        try:
+            from langgraph_crew_knowledge_base.extract import (
+                PdfExtractionError,
+                to_markdown,
+            )
+
+            final_title = title or Path(file_path).stem
+            final_authors = list(authors or [])
+            extracted = to_markdown(file_path)
+            markdown = extracted["markdown"]
+
+            book_id = re.sub(r"[^a-z0-9]+", "-", final_title.lower()).strip("-")
+            if not book_id:
+                book_id = str(uuid.uuid4())[:8]
+
+            indexed = _index_text(
+                markdown,
+                book_id=book_id,
+                title=final_title,
+                corpus=corpus,
+                authors=final_authors,
+                year=None,
+                tier=tier,
+                categories=list(categories or []),
+                tags=list(tags or []),
+                source_ref=root_ref,
+            )
+
+            result.update({
+                "status": indexed.get("status", "indexed"),
+                "title": final_title,
+                "authors": final_authors,
+                "tier": tier,
+                "categories": list(categories or []),
+                "tags": list(tags or []),
+                "book_id": book_id,
+                "kb_ref": f"knowledge_base:{corpus}/{book_id}",
+                "chunks": indexed.get("chunks", 0),
+                "sections": indexed.get("sections", 0),
+                "collection": indexed.get("collection", ""),
+                "extraction": extracted["kind"],
+                "message": (
+                    f"Indexed {indexed.get('chunks', 0)} chunk(s) from "
+                    f"{final_title} ({extracted['kind']}) into corpus '{corpus}'"
+                ),
+            })
+        except PdfExtractionError as exc:
+            result.update({
+                "status": "error",
+                "error": str(exc),
+                "message": (
+                    f"{Path(file_path).name}: {exc}"
+                ),
+            })
+        except Exception as e:  # noqa: BLE001 - report, never crash the caller
+            result.update({"status": "error", "error": str(e)})
+
     return json.dumps(result, indent=2)
+
+
+def _index_text(
+    markdown: str,
+    *,
+    book_id: str,
+    title: str,
+    corpus: str,
+    authors: List[str],
+    year: Optional[int],
+    tier: str,
+    categories: List[str],
+    tags: List[str],
+    source_ref: str,
+) -> Dict[str, Any]:
+    """Chunk + embed + upsert already-extracted text.
+
+    Shared by the markdown and the PDF/EPUB branch: one indexing path, so a book
+    from a PDF and a book from markdown cannot end up in different shapes.
+    """
+    from langgraph_crew_knowledge_base.indexer import index_text
+    from langgraph_crew_knowledge_base.tools import _qdrant
+
+    client = _qdrant()
+    if client is None:
+        raise RuntimeError("Qdrant unreachable - cannot index the document")
+
+    return index_text(
+        client,
+        markdown,
+        book_id=book_id,
+        title=title,
+        corpus=corpus,
+        authors=authors,
+        year=year,
+        tier=tier,
+        categories=categories,
+        tags=tags,
+        source_ref=source_ref,
+    )
 
 
 def knowledge_base___ingest_directory(

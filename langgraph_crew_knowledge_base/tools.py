@@ -657,87 +657,102 @@ def knowledge_base___chunk_document(
     background: bool = True,
 ) -> str:
     """
-    Chunk a document (PDF/EPUB) into the knowledge base.
-    
+    Index a document (PDF/EPUB/MD) into the knowledge base.
+
+    This used to be a stub: it answered "queued" with a job id, recorded it in
+    an in-memory dict and created 42 fake chunks — nothing reached Qdrant, so a
+    finished-looking call left an empty corpus. It now does the work and reports
+    what it actually wrote.
+
+    A PDF is extracted to text first (Docling when installed, PyMuPDF
+    otherwise) and then indexed by the same code path as markdown, so both end
+    up in the same shape (:mod:`extract`, :func:`indexer.index_text`).
+
     Args:
-        source_path: Path or URL to the document
+        source_path: Path to the document (vault path or absolute path)
         corpus: Corpus to add to
-        title: Document title (extracted if not provided)
-        authors: Document authors (extracted if not provided)
+        title: Document title (derived from the file name if omitted)
+        authors: Document authors
         tier: Content tier (foundational, standard, specialist, task)
         categories: Categories to assign
-        background: Run in background (default: true)
-        
+        background: Kept for API compatibility. Indexing is synchronous because
+            there is no worker to drain a queue; a "queued" answer that nothing
+            processes is what made this tool look broken.
+
     Returns:
-        JSON string with job status
+        JSON string with the ingestion result (status, chunks, book_id)
     """
     job_id = str(uuid.uuid4())[:8]
-    
-    job = {
-        "id": job_id,
-        "status": "queued",
-        "progress": 0,
-        "source_path": source_path,
-        "corpus": corpus,
-        "title": title,
-        "authors": authors,
-        "tier": tier,
-        "categories": categories or [],
-        "chunks_created": 0,
-        "error": None,
-        "created_at": datetime.now().isoformat(),
-        "completed_at": None,
-    }
-    
-    _MOCK_CHUNKING_JOBS[job_id] = job
-    
-    # TODO: Implement actual background chunking
-    # For now, mark as processing and complete
-    
+    try:
+        from langgraph_crew_knowledge_base.ingest import (
+            knowledge_base___ingest_from_root,
+        )
+
+        # One implementation: the vault ingest already resolves a path, picks
+        # the extraction, indexes and reports. Calling it keeps this tool from
+        # drifting from the code that actually writes the corpus.
+        raw = knowledge_base___ingest_from_root(
+            root_ref=source_path,
+            corpus=corpus,
+            title=title,
+            authors=authors,
+            tier=tier,
+            categories=categories,
+            background=False,
+        )
+    except Exception as exc:  # noqa: BLE001 - report, never crash the caller
+        return json.dumps(
+            {"job_id": job_id, "status": "error", "error": str(exc)},
+            indent=2,
+        )
+
+    payload = json.loads(raw) if isinstance(raw, str) else dict(raw or {})
+    payload.setdefault("job_id", job_id)
+    if payload.get("error") and payload.get("status") != "error":
+        payload["status"] = "error"
     if background:
-        # Simulate background processing
-        job["status"] = "processing"
-        return json.dumps({
-            "job_id": job_id,
-            "status": "queued",
-            "message": f"Chunking job {job_id} queued for {source_path}",
-            "check_status": f"knowledge_base___chunk_status(job_id='{job_id}')",
-        }, indent=2)
-    else:
-        # Simulate synchronous processing
-        job["status"] = "completed"
-        job["progress"] = 100
-        job["chunks_created"] = 42
-        job["completed_at"] = datetime.now().isoformat()
-        return json.dumps({
-            "job_id": job_id,
-            "status": "completed",
-            "chunks_created": 42,
-            "message": f"Successfully chunked {source_path}",
-        }, indent=2)
+        # Say plainly that nothing is running in the background, so a caller
+        # does not poll chunk_status for a job that already finished.
+        payload["note"] = (
+            "indexing is synchronous: this result is final, there is no "
+            "background job to poll"
+        )
+    return json.dumps(payload, indent=2)
 
 
 def knowledge_base___chunk_status(job_id: str) -> str:
     """
     Check the status of a chunking job.
-    
+
+    Jobs are recorded only while they run (indexing is synchronous since the
+    stub was removed), so an unknown id is the normal answer rather than an
+    error: the result was already returned by ``chunk_document``/
+    ``ingest_from_root``.
+
     Args:
         job_id: The job identifier
-        
+
     Returns:
         JSON string with job status
     """
     job = _MOCK_CHUNKING_JOBS.get(job_id)
     if not job:
-        return json.dumps({"error": f"Job not found: {job_id}"}, indent=2)
-    
+        return json.dumps({
+            "job_id": job_id,
+            "status": "unknown",
+            "message": (
+                "no such job. Indexing is synchronous — the ingest already "
+                "returned the final result (status, chunks, book_id)."
+            ),
+        }, indent=2)
+
     return json.dumps({
         "job_id": job_id,
-        "status": job["status"],
-        "progress": job["progress"],
-        "chunks_created": job["chunks_created"],
+        "status": job.get("status"),
+        "progress": job.get("progress"),
+        "chunks_created": job.get("chunks_created"),
         "error": job.get("error"),
-        "source_path": job["source_path"],
+        "source_path": job.get("source_path"),
     }, indent=2)
 
 
