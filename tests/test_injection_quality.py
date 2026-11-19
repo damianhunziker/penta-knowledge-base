@@ -112,6 +112,18 @@ class TestIndexPagesAreDropped:
         )
         assert runner._is_index_page(bibliography) is True
 
+    def test_an_image_credits_page_is_recognised(self):
+        credits = "\n".join(
+            [
+                "Silhouettes © 2008 Jupiterimages Corporation.",
+                "Photographs of Kennedy and Nixon © Bettman/Corbis.",
+                "Photograph of Teletubbies © 1996-2003 Ragdoll Ltd. Used with permission.",
+                "Illustration reprinted by permission of the artist.",
+                "Cover image courtesy of the publisher archives.",
+            ]
+        )
+        assert runner._is_index_page(credits) is True
+
     def test_real_prose_is_not_dropped(self):
         assert runner._is_index_page(PROSE * 5) is False
 

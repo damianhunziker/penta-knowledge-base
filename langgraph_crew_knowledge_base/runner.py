@@ -179,6 +179,20 @@ def _is_index_page(text: str) -> bool:
     if refs / len(lines) >= 0.5:
         return True
 
+    # A'. Two-column indexes put the page number mid-line
+    #     ("Kieser, Günther | peace poster, 148 | King, Jessie M.").
+    #     Count lines whose LAST number sits after the last comma with no
+    #     sentence punctuation after it — a name list, not prose.
+    paged = 0
+    for line in lines:
+        if len(line) > 160:
+            continue
+        tail = line.rsplit(",", 1)[-1].strip()
+        if re.fullmatch(r"\d{1,3}(\s*[-\u2013]\s*\d{1,3})?", tail):
+            paged += 1
+    if paged / len(lines) >= 0.4:
+        return True
+
     # B. Bibliographies / reference lists: many entries look like
     #    "Author, A. & Author, B. (2007). Title. Publisher."
     #    A bibliography is dense in years in parentheses and initials.
@@ -194,6 +208,16 @@ def _is_index_page(text: str) -> bool:
     numbered = sum(1 for line in lines if re.match(r"^(\d+(\.\d+)*\.?|[IVX]+\.)\s+\S", line))
     words = sum(len(line.split()) for line in lines)
     if numbered / len(lines) >= 0.5 and words / len(lines) < 8:
+        return True
+
+    # D. Image credits / copyright page: "Photograph of X © 1996-2003 Y Ltd."
+    #    Dense in © signs and permission wording; carries no design content.
+    credits = sum(
+        1
+        for line in lines
+        if "\u00a9" in line or re.search(r"\b(used with permission|reprinted|courtesy of)\b", line, re.I)
+    )
+    if credits / len(lines) >= 0.25:
         return True
 
     return False
