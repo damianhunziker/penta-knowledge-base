@@ -208,9 +208,9 @@ class TestDebugDisplay:
     """Injection mode decides how much of the KB block reaches the CLI.
 
     The operator's switch has to work at BOTH injection points — the mid-run
-    hook here and the task-start report in the executor. Both go through the
-    shared injection renderer, so this class pins the mid-run one: the hook must
-    call the display, and the display must honour the mode.
+    hook here and the task-start report in the executor. Both go through the one
+    injection report, so this class pins the mid-run one: the hook must call the
+    display, and the report must honour the mode.
     """
 
     @staticmethod
@@ -220,29 +220,31 @@ class TestDebugDisplay:
         _step(state)
         return _step(state, 1)
 
-    def test_full_mode_prints_the_block(self, monkeypatch, fake_block, capsys):
-        from app.core.global_state import InjectionOutputMode, set_injection_output_mode
+    def _run(self, monkeypatch, fake_block, debug):
+        from app.core import injection_report
+        from app.core.global_state import set_memory_debug_mode
 
-        set_injection_output_mode(InjectionOutputMode.FULL)
+        injection_report.reset()
+        set_memory_debug_mode(debug)
         try:
-            assert self._fire(monkeypatch, fake_block) is not None
+            return self._fire(monkeypatch, fake_block)
         finally:
-            set_injection_output_mode(InjectionOutputMode.AUTO)
+            set_memory_debug_mode(False)
+
+    def test_full_mode_prints_the_block(self, monkeypatch, fake_block, capsys):
+        assert self._run(monkeypatch, fake_block, True) is not None
         out = re.sub(r"\x1b\[[0-9;]*m", "", capsys.readouterr().out)
-        assert "[INJECTION] knowledge (mid-run)" in out
+        assert "── knowledge" in out
         # The passage text itself, not just a size line.
         assert "chunk #1" in out
         assert "read section" in out
 
-    def test_compact_mode_prints_only_the_line(self, monkeypatch, fake_block, capsys):
-        from app.core.global_state import InjectionOutputMode, set_injection_output_mode
-
-        set_injection_output_mode(InjectionOutputMode.COMPACT)
-        try:
-            assert self._fire(monkeypatch, fake_block) is not None
-        finally:
-            set_injection_output_mode(InjectionOutputMode.AUTO)
+    def test_compact_mode_hides_the_body_but_keeps_the_line(
+        self, monkeypatch, fake_block, capsys
+    ):
+        assert self._run(monkeypatch, fake_block, False) is not None
         out = re.sub(r"\x1b\[[0-9;]*m", "", capsys.readouterr().out)
-        assert "[INJECTION] knowledge (mid-run)" in out
+        assert "── knowledge" in out
+        assert "bodies hidden" in out
         # No passage body leaks through.
         assert "chunk #1" not in out

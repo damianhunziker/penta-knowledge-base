@@ -90,28 +90,39 @@ def apply_relevance(
     from app.core import memory_gate
 
     by_ref = {c.reference.kb_ref: c for c in chunks}
-    pairs = [(c.reference.kb_ref, float(c.score or 0.0)) for c in chunks]
 
-    result = memory_gate.gate(
-        pairs,
+    # rerank_candidates (not gate): it also records the ordering in the shared
+    # injection report, so the operator sees "ordering: cross-encoder" or
+    # "ordering: lexical fallback ⚠ <cause>" next to the corpus section.
+    ordered_refs, result = memory_gate.rerank_candidates(
+        [
+            (c.reference.kb_ref, float(c.score or 0.0), c.text)
+            for c in chunks
+        ],
         memory_type="knowledge",
         query=query,
-        text_of=lambda ref: by_ref[ref].text if ref in by_ref else "",
         fill_target=fill_target,
-        rerank=True,
     )
 
     ordered: List[Chunk] = []
-    for ref, decision in result.kept:
+    for ref, _final in ordered_refs:
         chunk = by_ref.get(ref)
         if chunk is None:
             continue
         # Keep the gate's verdict with the chunk so a debug view can show WHY
         # it was injected (floor vs adaptive_fill, and its lexical coverage).
+        decision = next(
+            (d for payload, d in result.kept if payload == ref), None
+        )
         # ``Chunk`` is frozen, so the field is replaced rather than assigned.
         from dataclasses import replace as _replace
 
-        ordered.append(_replace(chunk, relevance=decision.as_dict()))
+        ordered.append(
+            _replace(
+                chunk,
+                relevance=decision.as_dict() if decision is not None else None,
+            )
+        )
 
     logger.debug(
         "[KNOWLEDGE_BASE] gate: %d in, %d out (floor %.3f, %d adaptive%s)",
