@@ -68,7 +68,13 @@ categories: [topic]
 # Content...
 ```
 
-PDF: uses Docling extraction (background job).
+PDF/EPUB: converted to text (Docling when installed, PyMuPDF otherwise) and
+indexed **synchronously** — the tool's answer is the final result (status,
+chunks, book_id). There is no background queue: poll `chunk_status` and you get
+`unknown`.
+
+A scanned PDF without a text layer fails loudly (needs OCR first). A book whose
+chunks are frontmatter or bullets is a summary, not the book — ingest the PDF.
 
 ## Assignment and access scope
 
