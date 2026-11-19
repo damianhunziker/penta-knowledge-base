@@ -102,6 +102,23 @@ class KnowledgeBaseProvider:
             return f"Knowledge base available: {total_books} books, {total_chunks} chunks. Use knowledge_base___search."
         return ""
 
+    # -- cold injection (per task) ----------------------------------------
+
+    def build_task_block(
+        self,
+        task: Dict[str, Any] | None,
+        state: Dict[str, Any] | None = None,
+    ) -> str:
+        """The cold corpus block for one task (``""`` when there is nothing).
+
+        Delegates to :func:`runner.build_task_block`, which the executor reaches
+        through ``app.core.knowledge_seam``. The count comes from the task's
+        ``knowledge_chunks`` or ``KNOWLEDGE_TASK_CHUNKS``.
+        """
+        from langgraph_crew_knowledge_base.runner import build_task_block
+
+        return build_task_block(task, state)
+
     # -- node provider ----------------------------------------------------
 
     def node(self) -> Callable[..., Any]:

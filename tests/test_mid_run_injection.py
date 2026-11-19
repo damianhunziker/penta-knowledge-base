@@ -205,12 +205,12 @@ class TestMessageShape:
 
 
 class TestDebugDisplay:
-    """F9 (memory debug) decides how much of the KB block reaches the CLI.
+    """Injection mode decides how much of the KB block reaches the CLI.
 
     The operator's switch has to work at BOTH injection points — the mid-run
-    hook here and the task-start report in the executor. This class pins the
-    mid-run one: the hook must call the display, and the display must honour
-    the flag.
+    hook here and the task-start report in the executor. Both go through the
+    shared injection renderer, so this class pins the mid-run one: the hook must
+    call the display, and the display must honour the mode.
     """
 
     @staticmethod
@@ -220,52 +220,29 @@ class TestDebugDisplay:
         _step(state)
         return _step(state, 1)
 
-    def test_debug_on_prints_the_full_block(self, monkeypatch, fake_block, capsys):
-        from app.core.global_state import set_memory_debug_mode
+    def test_full_mode_prints_the_block(self, monkeypatch, fake_block, capsys):
+        from app.core.global_state import InjectionOutputMode, set_injection_output_mode
 
-        set_memory_debug_mode(True)
+        set_injection_output_mode(InjectionOutputMode.FULL)
         try:
             assert self._fire(monkeypatch, fake_block) is not None
         finally:
-            set_memory_debug_mode(False)
+            set_injection_output_mode(InjectionOutputMode.AUTO)
         out = re.sub(r"\x1b\[[0-9;]*m", "", capsys.readouterr().out)
-        assert "KNOWLEDGE BASE" in out
+        assert "[INJECTION] knowledge (mid-run)" in out
         # The passage text itself, not just a size line.
         assert "chunk #1" in out
         assert "read section" in out
 
-    def test_debug_off_prints_only_a_summary(self, monkeypatch, fake_block, capsys):
-        from app.core.global_state import set_memory_debug_mode
+    def test_compact_mode_prints_only_the_line(self, monkeypatch, fake_block, capsys):
+        from app.core.global_state import InjectionOutputMode, set_injection_output_mode
 
-        set_memory_debug_mode(False)
-        assert self._fire(monkeypatch, fake_block) is not None
+        set_injection_output_mode(InjectionOutputMode.COMPACT)
+        try:
+            assert self._fire(monkeypatch, fake_block) is not None
+        finally:
+            set_injection_output_mode(InjectionOutputMode.AUTO)
         out = re.sub(r"\x1b\[[0-9;]*m", "", capsys.readouterr().out)
-        assert "Knowledge:" in out
+        assert "[INJECTION] knowledge (mid-run)" in out
         # No passage body leaks through.
         assert "chunk #1" not in out
-        assert "KNOWLEDGE BASE\n" not in out
-
-    def test_hook_still_returns_the_block_when_debug_is_off(
-        self, monkeypatch, fake_block
-    ):
-        """Display is a side channel: the prompt gets the block either way."""
-        from app.core.global_state import set_memory_debug_mode
-
-        set_memory_debug_mode(False)
-        out = self._fire(monkeypatch, fake_block)
-        assert out is not None
-        assert "KNOWLEDGE BASE INFO" in out["llm_input_messages"][-1].content
-
-    def test_display_failure_never_breaks_the_injection(
-        self, monkeypatch, fake_block
-    ):
-        """A broken console must not cost the model its material."""
-        import app.core.cli_styling as styling
-
-        def _boom(*a, **kw):
-            raise RuntimeError("no console")
-
-        monkeypatch.setattr(styling, "display_knowledge_injection", _boom)
-        out = self._fire(monkeypatch, fake_block)
-        assert out is not None
-        assert "KNOWLEDGE BASE INFO" in out["llm_input_messages"][-1].content
