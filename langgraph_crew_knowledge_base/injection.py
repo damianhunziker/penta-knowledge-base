@@ -49,6 +49,9 @@ REMINDER_KIND = "knowledge-base"
 KEY_BASELINE = "knowledge_inject_baseline"
 KEY_FIRED = "knowledge_inject_fired"
 KEY_REFS = "knowledge_injected_refs"
+#: Index into ``messages`` where the previous profile ended. Everything
+#: after it is the interval being profiled for the next search.
+KEY_PROFILED_AT = "knowledge_profiled_at"
 
 
 def _runtime_reminder(text: str) -> HumanMessage:
@@ -84,30 +87,48 @@ def _current_task(state: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _query_for(state: Dict[str, Any], messages: List[Any]) -> str:
-    """What the agent is currently doing — task text plus recent tool output.
+    """What the agent is working on *right now*, as a search query.
 
-    The task description alone would return the same chunks every time; the
-    latest tool call/result is what the agent is actually looking at now.
+    The old version used the task description plus one tool name, so every
+    mid-run injection searched with the same string and returned the same
+    chunks — the agent could not tell the corpus had nothing new to say.
+
+    Now the interval since the last check is profiled
+    (:func:`app.core.memory_profile.profile_messages`): the agent's reasoning,
+    the tools it called with their arguments, and the salient entities. That is
+    what makes injection follow the work instead of the task opening line.
     """
-    parts: List[str] = []
     task = _current_task(state)
-    for key in ("description", "title"):
-        value = task.get(key)
-        if value:
-            parts.append(str(value))
-    if not parts and state.get("current_task"):
-        parts.append(str(state["current_task"]))
+    goal = str(
+        task.get("description")
+        or task.get("title")
+        or state.get("current_task")
+        or ""
+    ).strip()
 
-    for msg in reversed(messages):
-        tool_calls = getattr(msg, "tool_calls", None)
-        if tool_calls:
-            for call in tool_calls:
-                name = call.get("name") if isinstance(call, dict) else None
-                if name:
-                    parts.append(str(name))
-            break
+    # Where the previous check ended: everything after it is "this interval".
+    start = 0
+    try:
+        start = int(state.get(KEY_PROFILED_AT) or 0)
+    except (TypeError, ValueError):
+        start = 0
+    if start < 0 or start > len(messages):
+        start = 0
 
-    return " ".join(parts).strip()
+    try:
+        from app.core.memory_profile import profile_messages, profile_with_llm
+
+        profile = profile_with_llm(messages, goal) or profile_messages(
+            messages, start=start, goal=goal
+        )
+        query = profile.query()
+        if query:
+            return query
+    except Exception:  # noqa: BLE001 - profiling is optional
+        logger.debug("[KNOWLEDGE_INJECTION] profiling failed", exc_info=True)
+
+    # Fallback: the goal, so an unprofiled run still searches something sane.
+    return goal
 
 
 def reset_run_counters(state: Dict[str, Any]) -> None:
@@ -115,6 +136,7 @@ def reset_run_counters(state: Dict[str, Any]) -> None:
     state[KEY_BASELINE] = None
     state[KEY_FIRED] = 0
     state[KEY_REFS] = []
+    state[KEY_PROFILED_AT] = 0
 
 
 def knowledge_mid_run_injection(state: Dict[str, Any]) -> Dict[str, Any] | None:
@@ -216,12 +238,15 @@ def knowledge_mid_run_injection(state: Dict[str, Any]) -> Dict[str, Any] | None:
         KEY_BASELINE: current,
         KEY_FIRED: fired + 1,
         KEY_REFS: refs,
+        # The interval is consumed: the next profile starts here.
+        KEY_PROFILED_AT: len(messages),
     }
 
 
 __all__ = [
     "KEY_BASELINE",
     "KEY_FIRED",
+    "KEY_PROFILED_AT",
     "KEY_REFS",
     "REMINDER_KIND",
     "knowledge_mid_run_injection",

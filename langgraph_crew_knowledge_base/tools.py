@@ -217,8 +217,14 @@ def _vector_search(
     top_k: int,
     corpora: Optional[List[str]] = None,
     tier: Optional[str] = None,
+    book_id: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
-    """Dense vector search over the indexed corpus (``[]`` when unavailable)."""
+    """Dense vector search over the indexed corpus (``[]`` when unavailable).
+
+    ``book_id`` restricts the search to one book, which is what a per-book
+    score profile needs: in a shared top-k a large book crowds a small one out
+    entirely, so the small book's own scores would never be measured.
+    """
     if not _collection_ready():
         return []
     model = _embedder_model()
@@ -235,6 +241,10 @@ def _vector_search(
             )
         if tier:
             conditions.append({"key": "tier", "match": {"value": tier}})
+        if book_id:
+            conditions.append(
+                {"key": "book_id", "match": {"value": str(book_id)}}
+            )
         if conditions:
             from qdrant_client import models as qm
 
@@ -323,6 +333,7 @@ def knowledge_base___search(
     corpora: Optional[List[str]] = None,
     tier: Optional[str] = None,
     top_k: int = 10,
+    book_id: Optional[str] = None,
 ) -> str:
     """
     Search the knowledge base for relevant chunks.
@@ -332,12 +343,15 @@ def knowledge_base___search(
         corpora: List of corpora to search (default: all)
         tier: Filter by tier (foundational, standard, specialist, task)
         top_k: Maximum results to return
+        book_id: Restrict the search to one book. Needed to profile a single
+            book: in a shared top-k a large book crowds a small one out, so
+            "how does THIS book answer" cannot be read from a corpus search.
         
     Returns:
         JSON string with search results
     """
     # Real retrieval first: dense vector search over the indexed corpus.
-    vector_hits = _vector_search(query, top_k, corpora, tier)
+    vector_hits = _vector_search(query, top_k, corpora, tier, book_id=book_id)
     if vector_hits:
         return json.dumps(
             {

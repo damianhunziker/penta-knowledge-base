@@ -204,6 +204,71 @@ def show_effective(manager, agent_id: str, namespace: str) -> None:
     print()
 
 
+def show_profiles() -> None:
+    """Per-book score profiles and the outlier report.
+
+    A profile is an ingest diagnostic, not a runtime threshold: measured on this
+    deployment the books differ by ~0.04 in median while the spread inside one
+    book is ~0.13-0.19, so a per-book threshold would move by +/-0.02 and change
+    nothing. What it catches is a book that scores systematically low.
+    """
+    from langgraph_crew_knowledge_base.indexer import report_outliers
+    from langgraph_crew_knowledge_base.state_paths import resolve_db_path
+    import json as _json
+
+    base = resolve_db_path(None).parent / "book_profiles"
+    print()
+    print(_c("  BOOK SCORE PROFILES (ingest diagnostic, not a runtime threshold)", Style.BOLD + Style.CYAN))
+    _hr()
+    if not base.is_dir():
+        print(f"  {_c('No profiles yet. Run with --profile-books.', Style.YELLOW)}")
+        print()
+        return
+
+    for path in sorted(base.glob("*.json")):
+        try:
+            data = _json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        print(
+            f"    {data.get('book_id', path.stem)[:44]:46} "
+            f"median {data.get('median', 0):.3f}  "
+            f"{_c(f'p10 {data.get(chr(112)+chr(49)+chr(48), 0):.3f}  p90 {data.get(chr(112)+chr(57)+chr(48), 0):.3f}', Style.DIM)}"
+            f"  n={data.get('samples', 0)}"
+        )
+
+    out = report_outliers()
+    if out:
+        print(f"\n  {_c('OUTLIERS', Style.BOLD + Style.YELLOW)}")
+        for entry in out:
+            print(f"    {_c(entry['book_id'], Style.RED)}  z={entry['z']}  {entry['hint']}")
+    else:
+        print(f"\n  {_c('No outlier: every book scores within 2 sigma of the deployment median.', Style.DIM)}")
+    print()
+
+
+def profile_corpus(manager) -> None:
+    """Measure the profile of every book currently in the corpus."""
+    from langgraph_crew_knowledge_base.indexer import profile_book, write_profile
+    from langgraph_crew_knowledge_base.tools import _qdrant
+
+    client = _qdrant()
+    if client is None:
+        print(f"  {_c('Qdrant unreachable', Style.RED)}")
+        return
+    print()
+    print(_c("  MEASURING BOOK PROFILES", Style.BOLD + Style.CYAN))
+    _hr()
+    for book in manager.books:
+        profile = profile_book(client, book["book_id"], book["corpus"])
+        if profile:
+            write_profile(book["book_id"], profile)
+            print(f"    {_c('OK', Style.GREEN)} {book['title'][:44]:46} median {profile['median']:.3f}")
+        else:
+            print(f"    {_c('--', Style.YELLOW)} {book['title'][:44]:46} no scores")
+    print()
+
+
 def show_search(manager, query: str, top_k: int = 5) -> None:
     print()
     print(_c(f"  SEARCH “{query}”", Style.BOLD + Style.CYAN))
@@ -502,6 +567,10 @@ def parse_args(argv=None):
     parser.add_argument("--search", metavar="QUERY", help="semantic search over the corpus, then exit")
     parser.add_argument("--effective", nargs=2, metavar=("AGENT", "NS"),
                         help="what AGENT sees in namespace CUSTOMER/PROJECT, then exit")
+    parser.add_argument("--profiles", action="store_true",
+                        help="show per-book score profiles and any outlier, then exit")
+    parser.add_argument("--profile-books", action="store_true",
+                        help="(re)measure the score profile of every book in the corpus")
     parser.add_argument("--grant", metavar="AGENT", help="assign a book to AGENT (needs --book)")
     parser.add_argument("--unassign", metavar="AGENT", help="remove a book binding of AGENT (needs --book)")
     parser.add_argument("--book", metavar="BOOK_ID", help="the book_id to grant/remove")
@@ -528,6 +597,13 @@ def main(argv=None) -> int:
         return 0
     if args.search:
         show_search(manager, args.search)
+        return 0
+    if args.profiles:
+        show_profiles()
+        return 0
+    if args.profile_books:
+        profile_corpus(manager)
+        show_profiles()
         return 0
     if args.effective:
         customer, _, project = args.effective[1].partition("/")

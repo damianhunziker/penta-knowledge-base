@@ -39,6 +39,10 @@ class Chunk:
     parent_ref: str | None = None   # if this is a child, what's the parent
     chunk_index: int = 0
     char_count: int = 0
+    # The relevance gate's verdict (floor/adaptive_fill, similarity, lexical
+    # coverage). Diagnostics only: it is never rendered into the prompt, but a
+    # debug view can show WHY a passage was injected.
+    relevance: dict | None = None
 
 
 # ── RENDERING ────────────────────────────────────────────────────────────────

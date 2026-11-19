@@ -41,6 +41,13 @@ def _search(query: str, limit: int, settings: KnowledgeSettings) -> List[Chunk]:
 
     Uses the plugin's own tool wrapper when available (it owns the Qdrant
     connection details); anything unusable yields ``[]``.
+
+    No score filtering happens here: the relevance decision belongs to
+    :func:`apply_relevance`, which derives its floor from this query's own
+    score scale. The old ``score < settings.min_score`` cut used one global
+    number (0.35) for a corpus whose matching pages score 0.75-0.81 and whose
+    unrelated ones score 0.66 — it filtered nothing, and an index page at 0.77
+    displaced a real chapter.
     """
     if not (query or "").strip() or limit <= 0:
         return []
@@ -58,10 +65,63 @@ def _search(query: str, limit: int, settings: KnowledgeSettings) -> List[Chunk]:
         chunk = _to_chunk(hit)
         if chunk is None:
             continue
-        if chunk.score and chunk.score < settings.min_score:
-            continue
         chunks.append(chunk)
     return chunks
+
+
+def apply_relevance(
+    chunks: Sequence[Chunk],
+    query: str,
+    settings: KnowledgeSettings,
+    fill_target: int = 0,
+) -> List[Chunk]:
+    """Gate + rerank a candidate list, using the shared memory gate.
+
+    The knowledge corpus is one memory type, so it uses the same decision code
+    as episodes, rules and the agent's own history
+    (:mod:`app.core.memory_gate`): a per-query floor, an optional adaptive fill
+    that never crosses the measured noise ceiling, and a lexical rerank that
+    separates content from index/bibliography/credit pages.
+
+    Returns the surviving chunks in final order (possibly fewer than input).
+    """
+    if not chunks:
+        return []
+    from app.core import memory_gate
+
+    by_ref = {c.reference.kb_ref: c for c in chunks}
+    pairs = [(c.reference.kb_ref, float(c.score or 0.0)) for c in chunks]
+
+    result = memory_gate.gate(
+        pairs,
+        memory_type="knowledge",
+        query=query,
+        text_of=lambda ref: by_ref[ref].text if ref in by_ref else "",
+        fill_target=fill_target,
+        rerank=True,
+    )
+
+    ordered: List[Chunk] = []
+    for ref, decision in result.kept:
+        chunk = by_ref.get(ref)
+        if chunk is None:
+            continue
+        # Keep the gate's verdict with the chunk so a debug view can show WHY
+        # it was injected (floor vs adaptive_fill, and its lexical coverage).
+        # ``Chunk`` is frozen, so the field is replaced rather than assigned.
+        from dataclasses import replace as _replace
+
+        ordered.append(_replace(chunk, relevance=decision.as_dict()))
+
+    logger.debug(
+        "[KNOWLEDGE_BASE] gate: %d in, %d out (floor %.3f, %d adaptive%s)",
+        len(chunks),
+        len(ordered),
+        result.floor,
+        result.adaptive,
+        ", ambiguous" if result.ambiguous else "",
+    )
+    return ordered
 
 
 def _to_chunk(hit: Dict[str, Any]) -> Chunk | None:
@@ -263,7 +323,9 @@ def build_task_block(
     if not query:
         return ""
 
-    # Over-fetch so dropping index pages still leaves `count` real passages.
+    # Over-fetch so the gate can drop index pages and still leave `count`
+    # real passages. The gate (not the old 0.35 cut) decides what survives:
+    # per-query floor, adaptive fill to `count`, lexical rerank.
     chunks = _search(query, count * 3, settings)
     usable = [c for c in chunks if not _is_index_page(c.text)]
     if usable:
@@ -272,7 +334,7 @@ def build_task_block(
         logger.debug(
             "[KNOWLEDGE_BASE] every hit looked like an index page for %r", query
         )
-    chunks = chunks[:count]
+    chunks = apply_relevance(chunks, query, settings, fill_target=count)[:count]
     chunks = _trim_to_budget(chunks, settings.budget_tokens)
     return render_block(
         chunks,
@@ -308,8 +370,9 @@ def build_mid_run_block(
     already |= _seen_refs(state)
 
     # Over-fetch so filtering out what the agent has seen still leaves `count`.
-    chunks = _search(query, count + len(already), settings)
-    fresh = [c for c in chunks if c.reference.kb_ref not in already][:count]
+    chunks = _search(query, (count + len(already)) * 2, settings)
+    fresh = [c for c in chunks if c.reference.kb_ref not in already]
+    fresh = apply_relevance(fresh, query, settings, fill_target=count)[:count]
     fresh = _trim_to_budget(fresh, settings.budget_tokens)
     if not fresh:
         return ""

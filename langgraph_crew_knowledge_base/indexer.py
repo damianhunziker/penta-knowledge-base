@@ -21,6 +21,7 @@ vectors of the wrong dimension into the collection.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import re
 import uuid
@@ -412,3 +413,109 @@ __all__ = [
     "index_text",
     "split_markdown",
 ]
+
+
+# ── Per-book score profile (ingest diagnostic) ──────────────────────────────
+
+#: Reference queries used to profile a book. Deliberately broad: the point is
+#: to measure how this book answers a *typical* question, not a curated one.
+PROFILE_QUERIES = (
+    "color theory contrast",
+    "grid system layout",
+    "brand identity logo",
+    "typography legibility",
+    "visual hierarchy",
+    "page composition",
+    "editorial design",
+    "user interface navigation",
+    "print production",
+    "design process",
+)
+
+
+def profile_book(client, book_id: str, corpus: str) -> Dict[str, Any] | None:
+    """Measure a book's score profile against :data:`PROFILE_QUERIES`.
+
+    The result is an **outlier diagnostic**, not a runtime threshold: on this
+    deployment the five books differ by 0.036 in median while the spread inside
+    one book is 0.127-0.189, so a per-book threshold would move by ±0.02 and
+    change nothing. What a profile *does* catch is a book that scores
+    systematically low — different language, worse text, odd chunking — which
+    would otherwise produce weak hits forever with no explanation.
+
+    Returns the profile dict (also written next to the chunks as a payload-less
+    sidecar file), or ``None`` when Qdrant is unreachable.
+    """
+    try:
+        from app.core import memory_gate
+        from langgraph_crew_knowledge_base.tools import knowledge_base___search
+    except Exception as exc:  # noqa: BLE001 - profiling is optional
+        logger.warning("[KNOWLEDGE_BASE] book profiling unavailable: %s", exc)
+        return None
+
+    scores: List[float] = []
+    for query in PROFILE_QUERIES:
+        try:
+            # Query THIS book's vectors directly, not a shared corpus list: in a
+            # shared top-k the biggest book crowds a small one out entirely
+            # (measured: 40 hits covered only 3 of 5 books), and a profile built
+            # from the leftovers would describe rank share, not the book.
+            raw = knowledge_base___search(
+                query=query, corpora=[corpus], book_id=book_id, top_k=5
+            )
+            payload = json.loads(raw) if isinstance(raw, str) else (raw or {})
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[KNOWLEDGE_BASE] profile query %r failed: %s", query, exc)
+            continue
+        for hit in payload.get("results") or []:
+            if hit.get("book_id") == book_id and hit.get("score") is not None:
+                scores.append(float(hit["score"]))
+
+    if not scores:
+        return None
+    profile = memory_gate.build_profile(book_id, scores)
+    logger.info(
+        "[KNOWLEDGE_BASE] book profile %s: median %.3f (p10 %.3f, p90 %.3f, n=%d)",
+        book_id, profile.median, profile.p10, profile.p90, profile.samples,
+    )
+    return profile.as_dict()
+
+
+def write_profile(book_id: str, profile: Dict[str, Any]) -> str:
+    """Store a book profile beside the plugin state (readable, not indexed)."""
+    from langgraph_crew_knowledge_base.state_paths import resolve_db_path
+
+    base = resolve_db_path(None).parent / "book_profiles"
+    base.mkdir(parents=True, exist_ok=True)
+    path = base / f"{book_id}.json"
+    path.write_text(json.dumps(profile, indent=2), encoding="utf-8")
+    return str(path)
+
+
+def report_outliers() -> List[Dict[str, Any]]:
+    """Compare all stored book profiles and return the statistical outliers."""
+    from app.core import memory_gate
+    from langgraph_crew_knowledge_base.state_paths import resolve_db_path
+
+    base = resolve_db_path(None).parent / "book_profiles"
+    if not base.is_dir():
+        return []
+    profiles = []
+    for path in sorted(base.glob("*.json")):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            profiles.append(
+                memory_gate.BookProfile(
+                    book_id=str(data.get("book_id") or path.stem),
+                    median=float(data.get("median") or 0.0),
+                    p10=float(data.get("p10") or 0.0),
+                    p90=float(data.get("p90") or 0.0),
+                    samples=int(data.get("samples") or 0),
+                )
+            )
+        except Exception:  # noqa: BLE001 - a broken file must not break the report
+            continue
+    return memory_gate.outliers(profiles)
+
+
+__all__ = sorted(set(__all__) | {"PROFILE_QUERIES", "profile_book", "report_outliers", "write_profile"})
