@@ -326,6 +326,39 @@ def kb_status() -> Dict[str, Any]:
         return {"ready": False, "reason": str(exc), "chunks": 0}
 
 
+# ── CATALOG ───────────────────────────────────────────────────────────────────
+
+
+def _live_catalog() -> Dict[str, Any]:
+    """The catalog the Corpus actually holds (``_MOCK_CATALOG`` is a fallback).
+
+    Four tools (``list``, ``describe``, ``recommend_titles``, ``read``) used to
+    read ``_MOCK_CATALOG`` — a two-book demo fixture — so they answered
+    "Book not found" for every real book in the corpus while the vector search
+    next door returned hits from those very books. That is the kind of split
+    that makes an agent stop trusting a tool.
+    """
+    catalog = _build_catalog_from_qdrant()
+    if catalog.get("total_chunks"):
+        return catalog
+    # Nothing indexed: the demo catalog keeps the tools answerable on a bare
+    # install, and `source` says which one answered.
+    fallback = dict(_MOCK_CATALOG)
+    fallback["source"] = "mock"
+    return fallback
+
+
+def _find_book(book_id: str, corpus: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """One book's entry (with its corpus id) from the live catalog."""
+    for corpus_id, corpus_data in (_live_catalog().get("corpora") or {}).items():
+        if corpus and corpus_id != corpus:
+            continue
+        info = (corpus_data.get("books") or {}).get(book_id)
+        if info:
+            return {"corpus": corpus_id, **info}
+    return None
+
+
 # ── TOOLS ─────────────────────────────────────────────────────────────────────
 
 def knowledge_base___search(
@@ -384,10 +417,11 @@ def knowledge_base___search(
         "thinking": None,  # matches multiple
     }
     
-    for corpus_id, corpus_data in _MOCK_CATALOG["corpora"].items():
+    catalog = _live_catalog()
+    for corpus_id, corpus_data in (catalog.get("corpora") or {}).items():
         if corpora and corpus_id not in corpora:
             continue
-        for book_id, book_info in corpus_data["books"].items():
+        for book_id, book_info in (corpus_data.get("books") or {}).items():
             if tier and book_info.get("tier") != tier:
                 continue
             
@@ -484,8 +518,8 @@ def knowledge_base___read(
     corpus = parts[0]
     book_id = parts[1]
     
-    # Get book info from mock catalog
-    book_info = _MOCK_CATALOG["corpora"].get(corpus, {}).get("books", {}).get(book_id, {})
+    # The book must exist in the corpus that is actually indexed.
+    book_info = _find_book(book_id, corpus) or {}
     
     if not book_info:
         return f"Book not found: {kb_ref}"
@@ -535,11 +569,12 @@ def knowledge_base___list(
         JSON string with book list
     """
     books = []
-    
-    for corpus_id, corpus_data in _MOCK_CATALOG["corpora"].items():
+
+    catalog = _live_catalog()
+    for corpus_id, corpus_data in (catalog.get("corpora") or {}).items():
         if corpus and corpus_id != corpus:
             continue
-        for book_id, book_info in corpus_data["books"].items():
+        for book_id, book_info in (corpus_data.get("books") or {}).items():
             if tier and book_info.get("tier") != tier:
                 continue
             if category and category not in book_info.get("categories", []):
@@ -574,90 +609,123 @@ def knowledge_base___describe(book_id: str) -> str:
     Returns:
         JSON string with book details
     """
-    for corpus_id, corpus_data in _MOCK_CATALOG["corpora"].items():
-        if book_id in corpus_data["books"]:
-            book_info = corpus_data["books"][book_id]
-            return json.dumps({
-                "book_id": book_id,
-                "kb_ref": f"knowledge_base:{corpus_id}/{book_id}",
-                "title": book_info["title"],
-                "authors": book_info["authors"],
-                "year": book_info["year"],
-                "tier": book_info["tier"],
-                "categories": book_info.get("categories", []),
-                "chunk_count": book_info["chunks"],
-                "corpus": corpus_id,
-            }, indent=2)
-    
-    return json.dumps({"error": f"Book not found: {book_id}"}, indent=2)
+    found = _find_book(book_id)
+    if not found:
+        return json.dumps({"error": f"Book not found: {book_id}"}, indent=2)
+
+    return json.dumps({
+        "book_id": book_id,
+        "kb_ref": f"knowledge_base:{found['corpus']}/{book_id}",
+        "title": found["title"],
+        "authors": found.get("authors") or [],
+        "year": found.get("year"),
+        "tier": found.get("tier"),
+        "categories": found.get("categories") or [],
+        "chunk_count": found.get("chunks", 0),
+        "corpus": found["corpus"],
+    }, indent=2)
 
 
 def knowledge_base___recommend_titles(
     topic: str,
     top_k: int = 5,
 ) -> str:
-    """
-    Get title recommendations based on a topic.
-    
+    """Recommend titles that cover ``topic``, ranked by what their text says.
+
+    The old version matched the query against the book's TITLE, AUTHORS and
+    CATEGORIES only, so "color theory" returned nothing even though the corpus
+    holds whole chapters on colour — a title rarely contains its own subject.
+    It now asks the vector index which books actually answer the topic and
+    aggregates the hits per book, which is the same signal the search tool uses.
+
     Args:
-        topic: The topic to search for
+        topic: The topic to look for
         top_k: Maximum recommendations to return
-        
+
     Returns:
-        JSON string with recommendations
+        JSON string with recommendations (best first)
     """
-    # TODO: Implement actual semantic search + topic matching
-    # For now, match on title, categories, and authors
-    
-    recommendations = []
-    topic_lower = topic.lower()
-    
-    # Category mappings
-    category_keywords = {
-        "systems thinking": "systems-thinking",
-        "system": "systems-thinking",
-        "complexity": "complexity",
-        "decision": "decision-making",
-        "decision making": "decision-making",
-        "cognitive": "cognitive-science",
-        "cognitive science": "cognitive-science",
-    }
-    
-    for corpus_id, corpus_data in _MOCK_CATALOG["corpora"].items():
-        for book_id, book_info in corpus_data["books"].items():
-            relevance = 0.0
-            
-            # Check title
-            if topic_lower in book_info["title"].lower():
-                relevance = 0.9
-            
-            # Check categories
-            for keyword, category in category_keywords.items():
-                if keyword in topic_lower and category in book_info.get("categories", []):
-                    relevance = max(relevance, 0.7)
-            
-            # Check authors
-            if any(topic_lower in a.lower() for a in book_info["authors"]):
-                relevance = max(relevance, 0.5)
-            
-            if relevance > 0:
-                recommendations.append({
-                    "book_id": book_id,
-                    "kb_ref": f"knowledge_base:{corpus_id}/{book_id}",
-                    "title": book_info["title"],
-                    "authors": book_info["authors"],
-                    "relevance": relevance,
-                    "tier": book_info["tier"],
-                    "categories": book_info.get("categories", []),
-                })
-    
-    # Sort by relevance
-    recommendations.sort(key=lambda x: x["relevance"], reverse=True)
-    
+    topic = str(topic or "").strip()
+    if not topic:
+        return json.dumps({"topic": topic, "recommendations": [], "total": 0}, indent=2)
+
+    # Per book: how many hits, and the best score among them.
+    hits: Dict[str, Dict[str, Any]] = {}
+    try:
+        raw = _vector_search(topic, max(top_k * 4, 12))
+    except Exception as exc:  # noqa: BLE001 - a failed lookup is reported below
+        logger.warning("[KNOWLEDGE_BASE] recommend_titles search failed: %s", exc)
+        raw = []
+
+    for hit in raw or []:
+        book_id = str(hit.get("book_id") or "")
+        if not book_id:
+            continue
+        entry = hits.setdefault(
+            book_id,
+            {
+                "book_id": book_id,
+                "title": hit.get("title") or book_id,
+                "authors": hit.get("authors") or [],
+                "year": hit.get("year"),
+                "tier": hit.get("tier") or "",
+                "corpus": hit.get("corpus") or "",
+                "kb_ref": f"knowledge_base:{hit.get('corpus') or ''}/{book_id}",
+                "best_score": 0.0,
+                "passages": 0,
+            },
+        )
+        entry["passages"] += 1
+        entry["best_score"] = max(entry["best_score"], float(hit.get("score") or 0.0))
+
+    recommendations = sorted(
+        hits.values(), key=lambda e: (e["best_score"], e["passages"]), reverse=True
+    )[: max(1, int(top_k))]
+
+    # Honest reporting instead of a fake filter.
+    #
+    # Measured on this corpus: the top hit for a real topic and the top hit for
+    # nonsense both land in 0.77-0.84 — the distributions overlap, so no absolute
+    # floor separates them (see docs/plans/memory-relevance-implementation.md).
+    # A filter here would either drop real titles or keep nonsense, and the
+    # caller could not tell which. What DOES carry signal is the *spread* and the
+    # *passage count*: a book that answers a topic has several strong passages,
+    # a book that merely mentions the words has one.
+    #
+    # So the result states its own confidence and never pretends to filter.
+    for entry in recommendations:
+        entry["score"] = round(entry.pop("best_score"), 3)
+        entry["reason"] = f"{entry['passages']} matching passage(s) in the corpus"
+
+    # One strong title is a strong answer. The spread between "several titles
+    # each barely mentioned" and "one title with three solid passages" is what
+    # carries signal here, so the count is of TITLES that are strong, and one
+    # is enough for `high` as long as it really is strong.
+    strong = [e for e in recommendations if e["score"] >= 0.80 or e["passages"] >= 3]
+    if not strong:
+        confidence = "low"
+    elif len(strong) >= 2 or (strong[0]["passages"] >= 3 and strong[0]["score"] >= 0.80):
+        confidence = "high"
+    else:
+        confidence = "medium"
+    note = ""
+    if confidence == "low":
+        note = (
+            "only a weak match: on this corpus a relevant title usually yields "
+            "several passages above 0.80. Verify with knowledge_base___search "
+            "before relying on these."
+        )
+
     return json.dumps({
         "topic": topic,
-        "recommendations": recommendations[:top_k],
+        "recommendations": recommendations,
         "total": len(recommendations),
+        "confidence": confidence if recommendations else "none",
+        "source": "qdrant" if recommendations else "none",
+        "note": note if recommendations else (
+            "no passage in the corpus matches this topic; the corpus may be "
+            "empty or not indexed"
+        ),
     }, indent=2)
 
 
@@ -1310,13 +1378,7 @@ def knowledge_base___get_catalog() -> str:
     Returns:
         JSON string with catalog
     """
-    # Build from Qdrant (real data) first
-    catalog = _build_catalog_from_qdrant()
-    if catalog["total_chunks"] > 0:
-        return json.dumps(catalog, indent=2)
-    
-    # Fall back to mock catalog for demo purposes
-    return json.dumps(_MOCK_CATALOG, indent=2)
+    return json.dumps(_live_catalog(), indent=2)
 
 
 # ── PUBLIC EXPORTS ────────────────────────────────────────────────────────────
