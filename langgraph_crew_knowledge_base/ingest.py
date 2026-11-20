@@ -575,6 +575,18 @@ def knowledge_base___ingest_from_root(
             if not book_id:
                 book_id = str(uuid.uuid4())[:8]
             
+            # Keep the untouched original (see the PDF branch): a markdown
+            # source is just as capable of disappearing from its vault.
+            from langgraph_crew_knowledge_base.raw_store import store_document
+
+            archived = store_document(
+                file_path,
+                book_id=book_id,
+                corpus=corpus,
+                original_ref=root_ref,
+            )
+            raw_ref = archived.get("raw_ref", "")
+
             # Actually chunk + embed + upsert into Qdrant.
             from langgraph_crew_knowledge_base.indexer import index_markdown
             from langgraph_crew_knowledge_base.tools import _qdrant
@@ -597,6 +609,7 @@ def knowledge_base___ingest_from_root(
                 categories=final_categories,
                 tags=final_tags,
                 source_ref=root_ref,
+                raw_ref=raw_ref,
             )
 
             result.update({
@@ -612,6 +625,9 @@ def knowledge_base___ingest_from_root(
                 "sections": indexed.get("sections", 0),
                 "collection": indexed.get("collection", ""),
                 "frontmatter": fm,
+                "raw_ref": raw_ref,
+                "raw_archived": bool(archived.get("ok")),
+                "raw_error": archived.get("error", ""),
                 "message": (
                     f"Indexed {indexed.get('chunks', 0)} chunk(s) from "
                     f"{final_title} into corpus '{corpus}'"
@@ -643,6 +659,20 @@ def knowledge_base___ingest_from_root(
             if not book_id:
                 book_id = str(uuid.uuid4())[:8]
 
+            # Keep the untouched original before it is chunked. The corpus is
+            # the source of truth for text, but a citation needs the real
+            # document — and the file's original location (a sandbox workspace,
+            # a client vault) is not guaranteed to survive.
+            from langgraph_crew_knowledge_base.raw_store import store_document
+
+            archived = store_document(
+                file_path,
+                book_id=book_id,
+                corpus=corpus,
+                original_ref=root_ref,
+            )
+            raw_ref = archived.get("raw_ref", "")
+
             indexed = _index_text(
                 markdown,
                 book_id=book_id,
@@ -654,6 +684,7 @@ def knowledge_base___ingest_from_root(
                 categories=list(categories or []),
                 tags=list(tags or []),
                 source_ref=root_ref,
+                raw_ref=raw_ref,
             )
 
             result.update({
@@ -669,6 +700,9 @@ def knowledge_base___ingest_from_root(
                 "sections": indexed.get("sections", 0),
                 "collection": indexed.get("collection", ""),
                 "extraction": extracted["kind"],
+                "raw_ref": raw_ref,
+                "raw_archived": bool(archived.get("ok")),
+                "raw_error": archived.get("error", ""),
                 "message": (
                     f"Indexed {indexed.get('chunks', 0)} chunk(s) from "
                     f"{final_title} ({extracted['kind']}) into corpus '{corpus}'"
@@ -700,6 +734,7 @@ def _index_text(
     categories: List[str],
     tags: List[str],
     source_ref: str,
+    raw_ref: str = "",
 ) -> Dict[str, Any]:
     """Chunk + embed + upsert already-extracted text.
 

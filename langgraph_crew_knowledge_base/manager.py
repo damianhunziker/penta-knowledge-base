@@ -52,6 +52,9 @@ def _payload_books(points: Iterable[Any]) -> Dict[Tuple[str, str], Dict[str, Any
                 "real_chunks": 0,
                 "chars": 0,
                 "source": payload.get("source_ref") or "",
+                # The stored original (knowledge-raw:…) when the book was
+                # ingested after the raw store existed; "" otherwise.
+                "raw_ref": payload.get("raw_ref") or "",
             }
         text = payload.get("text") or ""
         row["chunks"] += 1

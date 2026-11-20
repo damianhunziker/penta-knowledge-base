@@ -262,6 +262,7 @@ def index_markdown(
     categories: Optional[Iterable[str]] = None,
     tags: Optional[Iterable[str]] = None,
     source_ref: str = "",
+    raw_ref: str = "",
 ) -> Dict[str, Any]:
     """Chunk a markdown file, embed it and upsert it into Qdrant.
 
@@ -297,6 +298,7 @@ def index_text(
     categories: Optional[Iterable[str]] = None,
     tags: Optional[Iterable[str]] = None,
     source_ref: str = "",
+    raw_ref: str = "",
 ) -> Dict[str, Any]:
     """Chunk already-extracted text, embed it and upsert it into Qdrant.
 
@@ -345,6 +347,10 @@ def index_text(
             "chunker_version": CHUNKER_VERSION,
             "embedding_model": EMBED_MODEL,
             "source_ref": source_ref or "",
+            # The untouched original this chunk came from, in the shared raw
+            # store (knowledge-raw:<sha256>.<ext>). Without it a citation can
+            # only name a file path that may no longer exist.
+            "raw_ref": raw_ref or "",
             "content_sha256": hashlib.sha256(
                 chunk["text"].encode("utf-8")
             ).hexdigest(),

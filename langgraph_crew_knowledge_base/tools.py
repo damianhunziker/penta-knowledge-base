@@ -212,6 +212,19 @@ def _collection_ready() -> bool:
         return False
 
 
+def _document_link(raw_ref: str, page: Any = None) -> Dict[str, Any]:
+    """Citation link to the stored original (``{}`` when none was archived)."""
+    if not raw_ref:
+        return {}
+    try:
+        from langgraph_crew_knowledge_base.raw_store import link_for
+
+        return link_for(str(raw_ref), page=page if isinstance(page, int) else None)
+    except Exception as exc:  # noqa: BLE001 - a link must never break a search
+        logger.warning("[KNOWLEDGE_BASE] document link failed: %s", exc)
+        return {"raw_ref": str(raw_ref), "available": False, "reason": str(exc)}
+
+
 def _vector_search(
     query: str,
     top_k: int,
@@ -294,6 +307,14 @@ def _vector_search(
                 "section_path": section,
                 "page_from": payload.get("page_from"),
                 "page_to": payload.get("page_to"),
+                # The untouched original behind this passage, when the book was
+                # ingested after the raw store existed. `document_link`
+                # carries the page anchor and says whether the file still
+                # resolves, so a citation can point at the real page.
+                "raw_ref": payload.get("raw_ref") or "",
+                "document_link": _document_link(
+                    payload.get("raw_ref") or "", payload.get("page_from")
+                ),
                 "text": payload.get("text") or "",
                 "score": float(hit.score or 0.0),
             }
@@ -1380,6 +1401,8 @@ def _build_catalog_from_qdrant() -> Dict[str, Any]:
                     "year": payload.get("year"),
                     "tier": payload.get("tier") or "standard",
                     "categories": payload.get("categories") or [],
+                    "source_ref": payload.get("source_ref") or "",
+                    "raw_ref": payload.get("raw_ref") or "",
                     "chunks": 0,
                 }
             corpora[corpus]["books"][book_id]["chunks"] += 1
@@ -1392,6 +1415,35 @@ def _build_catalog_from_qdrant() -> Dict[str, Any]:
     except Exception as exc:  # noqa: BLE001
         logger.debug("[KNOWLEDGE_BASE] catalog build failed: %s", exc)
         return {"corpora": {}, "total_books": 0, "total_chunks": 0}
+
+
+def knowledge_base___backfill_raw(book_id: str = "", dry_run: bool = False) -> str:
+    """Store the source document of an already-indexed book and tag its chunks.
+
+    Books indexed before the raw store existed have no ``raw_ref``, so their
+    passages cite a file path instead of a document. This archives the original
+    (if it still exists) into ``knowledge-raw:`` and writes the reference onto
+    every chunk of the book — no re-embedding, no re-chunking.
+
+    A book whose source file is gone is reported as ``ok: false`` with the path
+    that was expected: the chunks survive, but nothing can link to them, and
+    saying so is better than a citation that silently leads nowhere.
+
+    Args:
+        book_id: One book id. Empty = every book in the collection.
+        dry_run: Report what would be archived without writing.
+
+    Returns:
+        JSON string: per book, what was archived/tagged or why it could not be
+    """
+    from langgraph_crew_knowledge_base.raw_store import backfill
+
+    try:
+        report = backfill(book_id or "", dry_run=dry_run)
+    except Exception as exc:  # noqa: BLE001 - a repair tool must report, not crash
+        logger.warning("[KNOWLEDGE_BASE] raw backfill failed: %s", exc)
+        return json.dumps({"ok": False, "reason": str(exc)}, indent=2)
+    return json.dumps(report, indent=2)
 
 
 def knowledge_base___get_catalog() -> str:
@@ -1424,6 +1476,7 @@ __all__ = [
     "knowledge_base___access_matrix",
     # Catalog
     "knowledge_base___get_catalog",
+    "knowledge_base___backfill_raw",
     # File ingestion (from vault roots)
     "knowledge_base___discover_files",
     "knowledge_base___ingest_from_root",
