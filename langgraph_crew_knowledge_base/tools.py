@@ -1319,6 +1319,30 @@ def knowledge_base___access_matrix() -> str:
     )
 
 
+def _scroll_all_points(client, limit_per_page: int = 1000) -> List[Any]:
+    """Every point of the collection, following ``next_page_offset``.
+
+    ``client.scroll(limit=N)`` is a PAGE, not "the first N of everything": the
+    old catalog builder called it once with 1000 and silently reported a corpus
+    of 1'000 chunks while the collection held 3'659 — books that only appeared
+    on later pages were missing from the catalog, and ``describe`` said they did
+    not exist.
+    """
+    points: List[Any] = []
+    offset = None
+    while True:
+        page, offset = client.scroll(
+            KB_COLLECTION,
+            limit=limit_per_page,
+            offset=offset,
+            with_payload=True,
+        )
+        points.extend(page or [])
+        if offset is None:
+            break
+    return points
+
+
 def _build_catalog_from_qdrant() -> Dict[str, Any]:
     """Build the catalog by scanning the indexed chunks in Qdrant."""
     client = _qdrant()
@@ -1327,9 +1351,8 @@ def _build_catalog_from_qdrant() -> Dict[str, Any]:
     try:
         if not client.collection_exists(KB_COLLECTION):
             return {"corpora": {}, "total_books": 0, "total_chunks": 0}
-        
-        # Scroll through all points to aggregate books
-        points, _ = client.scroll(KB_COLLECTION, limit=1000, with_payload=True)
+
+        points = _scroll_all_points(client)
         
         corpora: Dict[str, Dict[str, Any]] = {}
         book_chunks: Dict[str, int] = {}

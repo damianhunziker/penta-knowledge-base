@@ -372,6 +372,39 @@ def _get_vault_path_for_root(root_name: str) -> Optional[str]:
 
 # ── INGESTION TOOLS ───────────────────────────────────────────────────────────
 
+def _root_ref_for(root: str, path: str) -> str:
+    """A ref for ``path`` under ``root`` that :func:`resolve_root_path` can read back.
+
+    ``discover_files`` used to splice ``f"{root}:{rel_path}"`` unconditionally.
+    For a root name (``project-vault``) that is right; for an absolute path it
+    produced ``/tmp/x:book.md`` — not a valid reference — so
+    ``ingest_directory`` reported "File not found" for every file it had just
+    discovered and returned 0 chunks without one word about why.
+    """
+    text = str(root or "").strip()
+    if os.path.isabs(text) or (len(text) > 2 and text[1] == ":"):
+        return path
+    return f"{text}:{os.path.relpath(path, _resolve_root_path(text) or text)}"
+
+
+def _iter_glob(base: Path, pattern: str):
+    """Yield paths for ``pattern``, supporting ``{a,b,c}`` alternatives.
+
+    ``Path.glob`` does **not** understand brace expansion — ``**/*.{md,pdf}``
+    matches nothing at all, silently. The batch tools used exactly that as their
+    default pattern, so ``ingest_directory`` always reported "No files found"
+    on a directory full of documents.
+    """
+    text = str(pattern or "").strip() or "*"
+    match = re.search(r"\{([^{}]+)\}", text)
+    if not match:
+        yield from base.glob(text)
+        return
+    for option in match.group(1).split(","):
+        expanded = text[: match.start()] + option.strip() + text[match.end() :]
+        yield from _iter_glob(base, expanded)
+
+
 def knowledge_base___discover_files(
     root: str,
     pattern: str = "**/*.md",
@@ -403,9 +436,9 @@ def knowledge_base___discover_files(
     
     files = []
     base = Path(base_path)
-    
+
     try:
-        for path in base.glob(pattern):
+        for path in _iter_glob(base, pattern):
             if len(files) >= max_files:
                 break
             
@@ -414,7 +447,11 @@ def knowledge_base___discover_files(
             
             files.append({
                 "path": rel_path,
-                "root_ref": f"{root}:{rel_path}",
+                # A plain filesystem root ("/tmp/x") is a supported input, and
+                # "/tmp/x:book.md" is NOT a resolvable ref — parse() accepts only
+                # "<root>:<path>" with a root name. Emitting a bare path in that
+                # case keeps every discovery result usable by the ingest tools.
+                "root_ref": _root_ref_for(root, str(path)),
                 "extension": ext,
                 "size": path.stat().st_size if path.exists() else 0,
                 "modified": datetime.fromtimestamp(path.stat().st_mtime).isoformat() if path.exists() else None,
@@ -711,9 +748,12 @@ def knowledge_base___ingest_directory(
         max_files: Maximum files to process
         background: Run ingestions in background
         recursive: Search recursively
-        
+
     Returns:
-        JSON string with batch ingestion status
+        JSON string with batch ingestion status: ``files_found``,
+        ``processed``/``failed``/``skipped`` counts, ``total_chunks``, and a
+        ``books`` list (book_id, kb_ref, chunks) plus ``errors`` per file.
+        Ingestion is synchronous, so ``jobs_queued`` is always 0.
     """
     # Build the root ref
     if directory:
@@ -743,16 +783,20 @@ def knowledge_base___ingest_directory(
         # Derive from directory name
         corpus = Path(directory).name if directory else root.replace('-', '_')
     
-    # Queue files for ingestion
+    # Ingest every discovered file. There is no queue behind this tool: each
+    # call indexes synchronously (see the "no worker" note in
+    # knowledge_base___ingest_from_root), so the payload reports what was
+    # actually written — chunks, book_id, status — per file and in aggregate.
     jobs = []
+    skipped = []
     for file_info in files:
         file_root_ref = file_info["root_ref"]
         ext = file_info["extension"]
-        
-        # Skip unsupported files
+
         if ext not in ('.md', '.pdf', '.epub'):
+            skipped.append({"file": file_root_ref, "reason": f"unsupported type {ext}"})
             continue
-        
+
         ingest_result = json.loads(
             knowledge_base___ingest_from_root(
                 file_root_ref,
@@ -761,23 +805,54 @@ def knowledge_base___ingest_directory(
                 background=background,
             )
         )
-        
+
         jobs.append({
             "file": file_root_ref,
             "job_id": ingest_result.get("job_id"),
             "status": ingest_result.get("status"),
             "title": ingest_result.get("title"),
+            "book_id": ingest_result.get("book_id"),
+            "kb_ref": ingest_result.get("kb_ref"),
+            "chunks": ingest_result.get("chunks"),
+            "error": ingest_result.get("error"),
         })
-    
+
+    processed = [j for j in jobs if j["status"] == "indexed"]
+    failed = [j for j in jobs if j["status"] == "error"]
+    total_chunks = sum(int(j["chunks"] or 0) for j in processed)
+
+    if failed:
+        message = (
+            f"Indexed {len(processed)} of {len(files)} file(s) into corpus "
+            f"'{corpus}' ({total_chunks} chunk(s)); {len(failed)} failed — "
+            f"see errors[].file and errors[].error"
+        )
+    else:
+        message = (
+            f"Indexed {len(processed)} file(s) into corpus '{corpus}' "
+            f"({total_chunks} chunk(s))"
+        )
+
     return json.dumps({
         "root": root,
         "directory": directory,
         "corpus": corpus,
         "pattern": pattern,
         "files_found": len(files),
-        "jobs_queued": len(jobs),
+        "processed": len(processed),
+        "failed": len(failed),
+        "skipped": len(skipped),
+        "total_chunks": total_chunks,
+        "books": [
+            {"book_id": j["book_id"], "kb_ref": j["kb_ref"], "chunks": j["chunks"]}
+            for j in processed
+        ],
+        "errors": [
+            {"file": j["file"], "error": j["error"]} for j in failed
+        ] + skipped,
         "jobs": jobs,
-        "message": f"Queued {len(jobs)} files for ingestion into corpus '{corpus}'",
+        "jobs_queued": 0,  # kept for callers of the old payload; nothing is queued
+        "message": message,
     }, indent=2)
 
 
