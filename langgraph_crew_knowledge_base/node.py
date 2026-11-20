@@ -410,11 +410,50 @@ class KnowledgeDiscoveryNode(NodeAgent):
 
                     import json as _json
 
+                    # Over-fetch, then gate: search returns raw vector hits,
+                    # and on this corpus an unrelated book scores 0.82 while a
+                    # relevant one scores 0.81 — the rank order alone cannot
+                    # say whether anything answers the task. The gate applies
+                    # the absolute cross-encoder floor, so discovery injects
+                    # only passages that actually match (and nothing at all
+                    # when none do).
                     raw = knowledge_base___search(
-                        query=task_description, corpora=None, tier=None, top_k=limit
+                        query=task_description,
+                        corpora=None,
+                        tier=None,
+                        top_k=max(limit * 4, 12),
                     )
                     result = _json.loads(raw) if isinstance(raw, str) else (raw or {})
-                    for hit in (result.get("results") or [])[:limit]:
+                    hits = [h for h in (result.get("results") or []) if isinstance(h, dict)]
+                    try:
+                        from langgraph_crew_knowledge_base.runner import (
+                            _to_chunk,
+                            apply_relevance,
+                        )
+                        from langgraph_crew_knowledge_base.settings import (
+                            load_settings,
+                        )
+
+                        candidates = [c for c in (_to_chunk(h) for h in hits) if c]
+                        gated = apply_relevance(
+                            candidates, task_description, load_settings(), fill_target=limit
+                        )
+                        keep_refs = [c.reference.kb_ref for c in gated]
+                        hits = [
+                            h
+                            for h in hits
+                            if (h.get("kb_ref") or "") in set(keep_refs)
+                        ][:limit]
+                        logger.debug(
+                            "[KNOWLEDGE_DISCOVERY] gate: %d -> %d passage(s)",
+                            len(candidates), len(hits),
+                        )
+                    except Exception as exc:  # noqa: BLE001 - report, then rank order
+                        logger.warning(
+                            "[KNOWLEDGE_DISCOVERY] relevance gate unavailable (%s); "
+                            "using rank order — passages may be unrelated", exc,
+                        )
+                    for hit in hits[:limit]:
                         if not isinstance(hit, dict):
                             continue
                         ref = hit.get("kb_ref") or ""
