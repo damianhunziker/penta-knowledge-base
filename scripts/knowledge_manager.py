@@ -111,16 +111,26 @@ def show_bases(manager, query: str = "") -> None:
     if not rows:
         print(f"  {_c('The corpus is empty.', Style.YELLOW)}")
         print(f"  {_c('Ingest a real document:', Style.DIM)}")
-        print(f"  {_c('  knowledge_base___ingest_from_root(root_ref=\"project-vault:Knowledge/book.pdf\", corpus=\"…\")', Style.DIM)}")
+        # Built outside the f-string: a backslash inside braces is PEP 701
+        # syntax (Python 3.12+) and a hard SyntaxError on the 3.9 floor this
+        # project declares — the whole file failed to import, so `/knowledge`
+        # died with an "Error in chat loop" instead of running.
+        hint = (
+            '  knowledge_base___ingest_from_root('
+            'root_ref="project-vault:Knowledge/book.pdf", corpus="…")'
+        )
+        print(f"  {_c(hint, Style.DIM)}")
         return
 
     for base in rows:
         real = base["real_books"]
         total = len(base["books"])
         flag = "" if real == total else _c(f"  ⚠ {total - real} without real text", Style.YELLOW)
+        # Nested f-string with a repeated quote is PEP 701 too (3.12+).
+        summary = _c(f"{total} book(s) · {base['chunks']} chunk(s)", Style.DIM)
         print(
             f"\n  {_c(base['base'], Style.BOLD + Style.GREEN)}"
-            f"  {_c(f'{total} book(s) · {base['chunks']} chunk(s)', Style.DIM)}{flag}"
+            f"  {summary}{flag}"
         )
         for book in sorted(base["books"], key=lambda b: b["title"].lower()):
             mark = _c("✓", Style.GREEN) if book["is_real"] else _c("!", Style.YELLOW)
@@ -144,7 +154,9 @@ def show_bindings(manager, query: str = "") -> None:
     _hr()
     if not rows:
         print(f"  {_c('No agent has anything assigned.', Style.YELLOW)}")
-        print(f"  {_c('Use "assign <agent>" to give an agent access.', Style.DIM)}")
+        # Single quotes around the hint: `"` inside a double-quoted f-string is
+        # PEP 701 (3.12+) and made this whole file unimportable on 3.9.
+        print(f"  {_c('Use `assign <agent>` to give an agent access.', Style.DIM)}")
         print()
         return
 
