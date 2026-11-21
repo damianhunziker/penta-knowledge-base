@@ -444,7 +444,9 @@ class KnowledgeDiscoveryNode(NodeAgent):
                 f"Knowledge discovery did not complete: {report['error']}. "
                 "The task continues without corpus discovery."
             )
-        elif status.get("ready"):
+        else:
+            # status.ready is true here: a missing corpus and a failed run were
+            # handled above, so this is the completed case.
             found = len(((report.get("round1_existing") or {}).get("found")) or [])
             candidates = len(((report.get("round2_web") or {}).get("candidates")) or [])
             assigned = len(((report.get("round3_installed") or {}).get("assigned")) or [])

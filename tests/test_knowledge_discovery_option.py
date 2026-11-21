@@ -163,12 +163,28 @@ class TestKnowledgeDiscoveryNode:
             "current_plan": [],
         }
 
-    def test_node_returns_to_executor_and_marks_completion(self):
-        """goto=executor, task marked done, findings keep the assigned titles."""
+    def test_node_returns_to_executor_and_marks_completion(self, monkeypatch):
+        """goto=executor, task marked done, findings keep the assigned titles.
+
+        The scout is stubbed: without it the node calls a live LLM, and this
+        test then blocks on the network instead of checking the contract. The
+        prompt and the run are covered in test_discovery_run.py.
+        """
         import asyncio
 
         pytest.importorskip("app.core.core_node", reason="core not importable")
-        from langgraph_crew_knowledge_base import node as kb_node
+        from langgraph_crew_knowledge_base import discovery, node as kb_node
+
+        async def fake_run(task, state, *, agent=None, timeout_s=None):
+            return {
+                "step": "knowledge_discovery",
+                "round1_existing": {"queries": [], "found": [], "gap": ""},
+                "round2_web": {"queries": [], "candidates": [], "needs_decision": []},
+                "round3_installed": {"chunked": [], "assigned": [], "skipped": []},
+                "answer_for_worker": "nothing matched",
+            }
+
+        monkeypatch.setattr(discovery, "run_discovery", fake_run)
 
         cmd = asyncio.run(kb_node.knowledge_discovery_node(self._state()))
         assert cmd.goto == "executor"
@@ -176,12 +192,23 @@ class TestKnowledgeDiscoveryNode:
         findings = cmd.update["knowledge_discovery_findings"]
         assert findings["assigned_titles"] == ["meadows-2008"]
 
-    def test_node_skips_when_not_enabled(self):
-        """Without the flag the node still exits to the executor."""
+    def test_node_skips_when_not_enabled(self, monkeypatch):
+        """Without the flag the node still exits to the executor.
+
+        ``ENABLE_KNOWLEDGE_DISCOVERY_DEFAULT`` outranks the flag by design (an
+        operator setting it means "every task"). The default is pinned to False
+        here so this test checks the skip and does not depend on the local
+        plugin.env — with `true` the node runs the scout, and the test would
+        block on a live LLM call instead of asserting anything.
+        """
         import asyncio
 
         pytest.importorskip("app.core.core_node", reason="core not importable")
         from langgraph_crew_knowledge_base import node as kb_node
+
+        monkeypatch.setattr(
+            kb_node, "_knowledge_discovery_enabled_by_default", lambda: False
+        )
 
         state = self._state()
         state["knowledge_discovery_enabled"] = False
@@ -197,11 +224,24 @@ class TestNodeVisibility:
     to the worker, so it looked as if the routing had been ignored.
     """
 
-    def test_node_prints_its_execution_box(self, capsys):
+    def test_node_prints_its_execution_box(self, capsys, monkeypatch):
         import asyncio
 
         pytest.importorskip("app.core.core_node", reason="core not importable")
-        from langgraph_crew_knowledge_base import node as kb_node
+        from langgraph_crew_knowledge_base import discovery, node as kb_node
+
+        # The box is printed before the run; stub the run so this test checks
+        # the visibility contract instead of calling a live LLM.
+        async def fake_run(task, state, *, agent=None, timeout_s=None):
+            return {
+                "step": "knowledge_discovery",
+                "round1_existing": {"queries": [], "found": [], "gap": ""},
+                "round2_web": {"queries": [], "candidates": [], "needs_decision": []},
+                "round3_installed": {"chunked": [], "assigned": [], "skipped": []},
+                "answer_for_worker": "nothing matched",
+            }
+
+        monkeypatch.setattr(discovery, "run_discovery", fake_run)
 
         state = {
             "messages": [],
