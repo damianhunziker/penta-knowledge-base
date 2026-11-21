@@ -501,6 +501,16 @@ class KnowledgeDiscoveryNode(NodeAgent):
                 f"{len(assigned_titles)} assigned title(s), "
                 f"{len(passages)} passage(s)."
             )
+            if not passages:
+                # A ready corpus with no passage above the relevance floor is a
+                # real answer — the task simply is not covered by any book. It
+                # used to return silently, so the step looked skipped and the
+                # operator had to guess whether discovery ran at all.
+                summary += (
+                    " No passage in the corpus matches this task closely enough "
+                    "to inject (relevance gate) — the books do not cover it. "
+                    "Continuing without corpus passages."
+                )
         else:
             summary = (
                 "Knowledge discovery found no corpus to search: "
@@ -508,12 +518,21 @@ class KnowledgeDiscoveryNode(NodeAgent):
                 "Continuing without additional knowledge. "
                 "Ingest documents with knowledge_base___ingest_from_root."
             )
-            try:
-                from app.core.cli_styling import console
 
-                console.print(f"[dim]📚 [KNOWLEDGE] {summary}[/dim]")
-            except Exception:  # noqa: BLE001 - display only
-                pass
+        # Always visible: the node returning to the executor without a line was
+        # indistinguishable from the routing being ignored.
+        try:
+            from app.core.cli_styling import console
+
+            searched = status.get("chunks") or 0
+            console.print(
+                f"[#9C27B0]📚 [KNOWLEDGE DISCOVERY][/#9C27B0] "
+                f"[dim]{len(assigned_titles)} assigned title(s) · "
+                f"{len(passages)} passage(s) over {searched} chunk(s)"
+                f"{'' if passages else ' · nothing above the relevance floor'}[/dim]"
+            )
+        except Exception:  # noqa: BLE001 - display only
+            pass
 
         return Command(
             goto="executor",
