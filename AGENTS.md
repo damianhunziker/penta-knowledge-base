@@ -8,7 +8,7 @@ This plugin owns the knowledge corpus (books, academic literature). Its rules ap
 - **License-first for chunking.** Never chunk a document without verifying the license (CC-BY, CC-BY-SA, MIT, public domain, or purchased). Unknown license = ask the user.
 - **Background chunking.** `chunk_document` with `background=True` is the default; large documents are never chunked synchronously.
 - **Assignments are training memory.** When a title is assigned to an agent, the agent receives it at run start and can read deeper on demand.
-- **The planner decides discovery.** `requires_knowledge_discovery: true/false` is a planner decision. The planner also suggests `assigned_titles`.
+- **The planner decides discovery.** For a complex project, `requires_knowledge_discovery: true/false` is a planner decision per task; for a simple request the ingest decides it (one classification, and only when this installation can actually run it — `app/core/discovery_seam.py`). The planner also suggests `assigned_titles`.
 - Ingest from vault roots: `tool_registry___system_request(tool_name="knowledge_base___ingest_from_root", arguments={"root_ref": "project-vault:Knowledge/book.md", "corpus": …})`. Markdown frontmatter provides metadata.
 - **Injection is tuned in `plugin.env`.** Copy `plugin.env.example`: `KNOWLEDGE_INJECT_AFTER_TOOLS` (default 13), `KNOWLEDGE_INJECT_CHUNKS` (3), `KNOWLEDGE_TASK_CHUNKS` (3). A task may override the start count with `knowledge_chunks`. See `settings.py`.
 - **Discovery is ONE scout, two rounds.** `knowledge_scout` searches the corpus, then researches the gap on the web, then installs and assigns — one pass, one JSON report. There is no separate researcher/curator stage; if you add one, it is a second place to keep in step.
