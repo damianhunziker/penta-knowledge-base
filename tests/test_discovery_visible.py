@@ -54,79 +54,72 @@ def node():
 
 
 @pytest.fixture
-def stub_search(monkeypatch):
-    """Stub the corpus search + gate at the module the node imports from."""
+def stub_scout(monkeypatch):
+    """Replace the scout's LLM run with a canned two-round report."""
 
-    def _install(hits, kept_refs):
-        import langgraph_crew_knowledge_base.tools as tools
-        import langgraph_crew_knowledge_base.runner as runner
+    def _install(found=(), candidates=(), error=""):
+        import langgraph_crew_knowledge_base.discovery as discovery
 
-        monkeypatch.setattr(
-            tools,
-            "knowledge_base___search",
-            lambda **kw: json.dumps({"results": hits, "total": len(hits)}),
-        )
-        monkeypatch.setattr(tools, "kb_status", lambda: {"ready": True, "reason": "", "chunks": 5613})
+        report = {
+            "step": "knowledge_discovery",
+            "task": "recherchier eüber klimwandel",
+            "round1_existing": {"queries": ["climate"], "found": list(found),
+                                "gap": "no climate title"},
+            "round2_web": {"queries": ["ipcc"], "candidates": list(candidates),
+                           "needs_decision": []},
+            "round3_installed": {"chunked": [], "assigned": [], "skipped": []},
+            "answer_for_worker": "Nothing matched." if not (found or candidates)
+            else "Use the sources above.",
+        }
+        if error:
+            report = discovery._failed({"task": "t"}, error)
 
-        class _Ref:
-            def __init__(self, kb_ref):
-                self.kb_ref = kb_ref
-                self.book_id = kb_ref
+        async def fake_run(task, state, *, agent=None, timeout_s=None):
+            return report
 
-        class _Chunk:
-            def __init__(self, kb_ref):
-                self.reference = _Ref(kb_ref)
-
-        def fake_apply(chunks, query, settings, fill_target=0):
-            return [c for c in chunks if c.reference.kb_ref in kept_refs]
-
-        # The node imports both names from this module inside the function.
-        monkeypatch.setattr(runner, "apply_relevance", fake_apply)
-        monkeypatch.setattr(
-            runner, "_to_chunk", lambda h: _Chunk(h["kb_ref"]) if isinstance(h, dict) else None
-        )
+        monkeypatch.setattr(discovery, "run_discovery", fake_run)
 
     return _install
 
 
 class TestVisibleOutcome:
-    def test_zero_passages_is_reported_not_silent(self, node, stub_search, capsys):
-        """A ready corpus with nothing above the floor must still say so."""
-        hits = [
-            {"kb_ref": "kb:1", "book_id": "b1", "text": "irrelevant", "score": 0.82, "title": "B1"},
-            {"kb_ref": "kb:2", "book_id": "b1", "text": "irrelevant", "score": 0.81, "title": "B1"},
-        ]
-        stub_search(hits, kept_refs=set())  # the gate drops everything
+    def test_nothing_found_is_reported_not_silent(self, node, stub_scout, capsys):
+        """A run that finds nothing must still say so."""
+        stub_scout()
 
         command = asyncio.run(node.execute(_state()))
         out = _plain(capsys.readouterr().out)
 
         assert "KNOWLEDGE DISCOVERY" in out, "the node printed nothing"
-        assert "nothing above the relevance floor" in out
-        assert "0 passage" in out
-
-        findings = command.update["knowledge_discovery_findings"]
-        assert findings["passages"] == []
+        assert "0 corpus title" in out
         summary = command.update["messages"][-1].content
-        assert "do not cover it" in summary or "relevance gate" in summary
+        assert "do not cover it" in summary or "Neither the corpus" in summary
 
-    def test_a_passage_result_reports_the_count(self, node, stub_search, capsys):
-        hits = [
-            {"kb_ref": "kb:1", "book_id": "b1", "text": "relevant", "score": 0.80, "title": "B1"},
-        ]
-        stub_search(hits, kept_refs={"kb:1"})
+    def test_a_found_title_reports_the_count(self, node, stub_scout, capsys):
+        stub_scout(found=[{"book_id": "b1", "kb_ref": "kb:1", "title": "B1"}])
 
         command = asyncio.run(node.execute(_state()))
         out = _plain(capsys.readouterr().out)
 
         assert "KNOWLEDGE DISCOVERY" in out
-        assert "1 passage" in out
-        assert command.update["knowledge_discovery_findings"]["passages"]
-        assert "nothing above the relevance floor" not in out
+        assert "1 corpus title" in out
+        # The found title joins the agent's standing assignments — both are in
+        # scope for the task, so only membership is asserted.
+        assert "b1" in command.update["knowledge_discovery_findings"]["assigned_titles"]
 
-    def test_a_repeat_entry_does_not_recount(self, node, stub_search):
+    def test_a_failed_run_says_so(self, node, stub_scout, capsys):
+        stub_scout(error="the scout run failed: TimeoutError")
+
+        command = asyncio.run(node.execute(_state()))
+        out = _plain(capsys.readouterr().out)
+        summary = command.update["messages"][-1].content
+
+        assert "failed" in out
+        assert "did not complete" in summary
+
+    def test_a_repeat_entry_does_not_recount(self, node, stub_scout):
         """The loop may re-enter; completion is recorded so it does not redo work."""
-        stub_search([], kept_refs=set())
+        stub_scout()
         first = asyncio.run(node.execute(_state()))
         done = first.update["knowledge_discovery_completed_for_tasks"]
         assert done

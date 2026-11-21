@@ -360,119 +360,42 @@ class KnowledgeDiscoveryNode(NodeAgent):
                 if title not in assigned_titles:
                     assigned_titles.append(title)
 
-        # Search the corpus for titles the planner did not name.
+        # ── The discovery run ────────────────────────────────────────────
+        # One agent does both halves in a single pass: what the corpus already
+        # has, and what exists on the internet, then installs and assigns what
+        # is missing (see discovery.py and agents/knowledge_scout.md). The old
+        # code searched the corpus itself and stopped there — three capable
+        # agent manifests were declared and never executed.
         recommendations: List[Dict[str, Any]] = []
         passages: List[Dict[str, Any]] = []
+        report: Dict[str, Any] = {}
         if not _knowledge_base_disabled():
             try:
-                from langgraph_crew_knowledge_base.settings import (
-                    chunks_for_task,
-                    load_settings,
+                from langgraph_crew_knowledge_base.discovery import (
+                    report_as_findings,
+                    run_discovery,
                 )
 
-                settings = load_settings()
-                # How many chunks this task gets at start, in priority order:
-                #   1. the task's own ``knowledge_chunks`` (planner decision),
-                #   2. ``x-penta.knowledge_base.chunks`` of the agent manifest,
-                #   3. KNOWLEDGE_TASK_CHUNKS from the plugin env.
-                _task_for_limit = next(
-                    (
-                        t
-                        for t in list(task_queue) + list(current_plan)
-                        if isinstance(t, dict)
-                        and (
-                            t.get("id") == current_task
-                            or t.get("description") == current_task
-                        )
+                report = await run_discovery(
+                    task_description,
+                    dict(state),
+                    agent=self,
+                )
+                derived = report_as_findings(report)
+                for title in derived.get("assigned_titles") or []:
+                    if title not in assigned_titles:
+                        assigned_titles.append(title)
+                recommendations = list(derived.get("recommendations") or [])
+                passages = list(derived.get("passages") or [])
+            except Exception as exc:  # noqa: BLE001 - discovery never breaks a run
+                logger.warning("[KNOWLEDGE_DISCOVERY] discovery run failed: %s", exc)
+                report = {
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "answer_for_worker": (
+                        "Knowledge discovery failed before it could answer: "
+                        f"{type(exc).__name__}: {exc}"
                     ),
-                    {},
-                )
-                _manifest_chunks = (
-                    _manifest_knowledge_config(task_role).get("chunks")
-                    if task_role
-                    else None
-                )
-                if (
-                    _task_for_limit.get("knowledge_chunks") is None
-                    and _manifest_chunks is not None
-                ):
-                    _task_for_limit = {
-                        **_task_for_limit,
-                        "knowledge_chunks": _manifest_chunks,
-                    }
-                limit = chunks_for_task(_task_for_limit, settings)
-
-                if limit > 0:
-                    from langgraph_crew_knowledge_base.tools import (
-                        knowledge_base___read,
-                        knowledge_base___search,
-                    )
-
-                    import json as _json
-
-                    # Over-fetch, then gate: search returns raw vector hits,
-                    # and on this corpus an unrelated book scores 0.82 while a
-                    # relevant one scores 0.81 — the rank order alone cannot
-                    # say whether anything answers the task. The gate applies
-                    # the absolute cross-encoder floor, so discovery injects
-                    # only passages that actually match (and nothing at all
-                    # when none do).
-                    raw = knowledge_base___search(
-                        query=task_description,
-                        corpora=None,
-                        tier=None,
-                        top_k=max(limit * 4, 12),
-                    )
-                    result = _json.loads(raw) if isinstance(raw, str) else (raw or {})
-                    hits = [h for h in (result.get("results") or []) if isinstance(h, dict)]
-                    try:
-                        from langgraph_crew_knowledge_base.runner import (
-                            _to_chunk,
-                            apply_relevance,
-                        )
-                        from langgraph_crew_knowledge_base.settings import (
-                            load_settings,
-                        )
-
-                        candidates = [c for c in (_to_chunk(h) for h in hits) if c]
-                        gated = apply_relevance(
-                            candidates, task_description, load_settings(), fill_target=limit
-                        )
-                        keep_refs = [c.reference.kb_ref for c in gated]
-                        hits = [
-                            h
-                            for h in hits
-                            if (h.get("kb_ref") or "") in set(keep_refs)
-                        ][:limit]
-                        logger.debug(
-                            "[KNOWLEDGE_DISCOVERY] gate: %d -> %d passage(s)",
-                            len(candidates), len(hits),
-                        )
-                    except Exception as exc:  # noqa: BLE001 - report, then rank order
-                        logger.warning(
-                            "[KNOWLEDGE_DISCOVERY] relevance gate unavailable (%s); "
-                            "using rank order — passages may be unrelated", exc,
-                        )
-                    for hit in hits[:limit]:
-                        if not isinstance(hit, dict):
-                            continue
-                        ref = hit.get("kb_ref") or ""
-                        book = hit.get("book_id") or ""
-                        if ref:
-                            passages.append(
-                                {
-                                    "kb_ref": ref,
-                                    "text": hit.get("text") or "",
-                                    "score": hit.get("score"),
-                                    "title": hit.get("title") or book,
-                                }
-                            )
-                        elif book and book not in assigned_titles:
-                            recommendations.append(
-                                {"title": book, "reason": "corpus match"}
-                            )
-            except Exception:  # noqa: BLE001 - discovery must never break the run
-                logger.debug("[KNOWLEDGE_DISCOVERY] corpus search failed", exc_info=True)
+                }
 
         # An empty corpus is a real answer, not a silent no-op: say why nothing
         # was found, so the transcript does not look like a skipped step.
@@ -493,24 +416,38 @@ class KnowledgeDiscoveryNode(NodeAgent):
             "passages": passages,
             "chunking_jobs": list(state.get("knowledge_discovery_chunking_jobs") or []),
             "corpus": status,
+            # The complete two-round answer, and the scout's own summary. The
+            # executor renders these for the worker; keeping the report whole
+            # means the worker sees what was searched and what was rejected,
+            # not just the surviving titles.
+            "report": report,
+            "answer_for_worker": report.get("answer_for_worker", ""),
+            "gap": (report.get("round1_existing") or {}).get("gap", ""),
+            "needs_decision": (report.get("round2_web") or {}).get("needs_decision", []),
+            "error": report.get("error", ""),
         }
 
-        if status.get("ready"):
+        if report.get("error"):
+            # The run itself failed — say that, not "completed with 0".
+            summary = (
+                f"Knowledge discovery did not complete: {report['error']}. "
+                "The task continues without corpus discovery."
+            )
+        elif status.get("ready"):
+            found = len(((report.get("round1_existing") or {}).get("found")) or [])
+            candidates = len(((report.get("round2_web") or {}).get("candidates")) or [])
+            assigned = len(((report.get("round3_installed") or {}).get("assigned")) or [])
             summary = (
                 "Knowledge discovery completed. "
-                f"{len(assigned_titles)} assigned title(s), "
-                f"{len(passages)} passage(s)."
+                f"{found} corpus title(s) found, {candidates} web candidate(s), "
+                f"{assigned} assignment(s), {len(assigned_titles)} assigned title(s)."
             )
-            if not passages:
-                # A ready corpus with no passage above the relevance floor is a
-                # real answer — the task simply is not covered by any book. It
-                # used to return silently, so the step looked skipped and the
-                # operator had to guess whether discovery ran at all.
+            if not found and not candidates:
                 summary += (
-                    " No passage in the corpus matches this task closely enough "
-                    "to inject (relevance gate) — the books do not cover it. "
-                    "Continuing without corpus passages."
+                    " Neither the corpus nor the web research produced a usable "
+                    "source for this task — the books do not cover it."
                 )
+
         else:
             summary = (
                 "Knowledge discovery found no corpus to search: "
@@ -525,11 +462,20 @@ class KnowledgeDiscoveryNode(NodeAgent):
             from app.core.cli_styling import console
 
             searched = status.get("chunks") or 0
+            found = len(((report.get("round1_existing") or {}).get("found")) or [])
+            candidates = len(((report.get("round2_web") or {}).get("candidates")) or [])
+            assigned_now = len(
+                ((report.get("round3_installed") or {}).get("assigned")) or []
+            )
+            if report.get("error"):
+                detail = f"failed · {report['error'][:90]}"
+            else:
+                detail = (
+                    f"{found} corpus title(s) · {candidates} web candidate(s) "
+                    f"· {assigned_now} assignment(s) · {searched} chunk(s) searched"
+                )
             console.print(
-                f"[#9C27B0]📚 [KNOWLEDGE DISCOVERY][/#9C27B0] "
-                f"[dim]{len(assigned_titles)} assigned title(s) · "
-                f"{len(passages)} passage(s) over {searched} chunk(s)"
-                f"{'' if passages else ' · nothing above the relevance floor'}[/dim]"
+                f"[#9C27B0]📚 [KNOWLEDGE DISCOVERY][/#9C27B0] [dim]{detail}[/dim]"
             )
         except Exception:  # noqa: BLE001 - display only
             pass
