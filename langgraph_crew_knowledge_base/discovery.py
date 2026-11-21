@@ -2,9 +2,10 @@
 """The knowledge discovery run: one agent, two rounds, one JSON report.
 
 The node used to do pure Python: search the corpus, assemble a dict, done. Three
-capable agent manifests (``knowledge_scout``, ``knowledge_researcher``,
+agent manifests (``knowledge_scout``, ``knowledge_researcher``,
 ``knowledge_curator``) were declared and **never executed** — ``llm_role`` was
-set on the node and nothing ever called the model.
+set on the node and nothing ever called the model. The two later stages are now
+removed: the scout absorbs them, so there is no second place to keep in step.
 
 This module runs the scout once, exactly like tool discovery runs its
 researcher: an LLM with tools, a system prompt that says what to do, and a JSON
@@ -22,6 +23,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import time
 from typing import Any, Dict, List, Optional
@@ -31,9 +33,18 @@ logger = logging.getLogger(__name__)
 #: Agent that performs the run (see ``agents/knowledge_scout.md``).
 SCOUT_AGENT = "knowledge_scout"
 
-#: A discovery run that takes longer than this is abandoned — the worker is
-#: waiting, and a report that arrives after ten minutes is worse than none.
-DEFAULT_TIMEOUT_S = float(180)
+#: How long a discovery run may take before it is cut off.
+#:
+#: A three-round run is genuinely long: several corpus searches, web research,
+#: then download/extract/embed for each document it decides to install. Measured
+#: on a real run it chunked two vault documents and assigned them — and 180 s cut
+#: it off before it could write its report. The side effects had already
+#: happened, so the result looked like a failure that changed nothing.
+#:
+#: 15 minutes is the default; ``KNOWLEDGE_DISCOVERY_TIMEOUT`` overrides it.
+DEFAULT_TIMEOUT_S = float(
+    os.getenv("KNOWLEDGE_DISCOVERY_TIMEOUT", "900").strip() or 900
+)
 
 
 def _extract_json(text: str) -> Optional[Dict[str, Any]]:
@@ -144,6 +155,19 @@ async def run_discovery(
             timeout=limit,
         )
         content = result.content if hasattr(result, "content") else str(result)
+    except asyncio.TimeoutError:
+        # The run was cut off, but its TOOL CALLS already happened: in a real
+        # run the scout chunked two vault documents and assigned them before
+        # the deadline, and this branch then reported "failed" and dropped the
+        # evidence of work that is visible in Qdrant and the assignment table.
+        # Report the timeout AND what it managed to do, so the worker is not
+        # told nothing happened when things did.
+        logger.warning(
+            "[KNOWLEDGE_DISCOVERY] scout hit the %gs limit; reporting what it "
+            "completed before the deadline",
+            limit,
+        )
+        return _timed_out(challenge, limit, state)
     except Exception as exc:  # noqa: BLE001 - a failed run is reported, not raised
         logger.warning("[KNOWLEDGE_DISCOVERY] scout run failed: %s", exc)
         return _failed(challenge, f"the scout run failed: {type(exc).__name__}: {exc}")
@@ -191,6 +215,56 @@ def _failed(
     }
     if raw:
         report["raw_answer"] = raw
+    return report
+
+
+def _timed_out(
+    challenge: Dict[str, Any], limit: float, state: Dict[str, Any]
+) -> Dict[str, Any]:
+    """A timeout report that still says what the run actually changed.
+
+    Reads the store and the corpus, because those are the record of what
+    happened — the scout's own JSON never arrived.
+    """
+    report = _failed(
+        challenge,
+        f"the scout reached the {limit:g}s limit before answering",
+    )
+    report["_meta"]["source"] = "timeout"
+
+    role = str(challenge.get("agent") or "")
+    assigned: List[Dict[str, Any]] = []
+    if role:
+        try:
+            from langgraph_crew_knowledge_base.ladder import resolve_agent
+
+            resolved = resolve_agent(
+                role,
+                customer=str(challenge.get("customer") or ""),
+                project=str(challenge.get("project") or ""),
+            )
+            for entry in resolved.get("store") or []:
+                assigned.append(
+                    {
+                        "agent_id": role,
+                        "book_ids": [entry.get("value")],
+                        "scope": entry.get("scope"),
+                        "customer": entry.get("customer"),
+                        "project": entry.get("project"),
+                        "why": "recorded before the deadline",
+                    }
+                )
+        except Exception as exc:  # noqa: BLE001 - a report must not raise
+            logger.warning("[KNOWLEDGE_DISCOVERY] timeout report: %s", exc)
+
+    report["round3_installed"]["assigned"] = assigned
+    if assigned:
+        report["answer_for_worker"] = (
+            f"Knowledge discovery hit its {limit:g}s limit before writing its "
+            f"report, but it did assign {len(assigned)} title(s) to {role}: "
+            + ", ".join(a["book_ids"][0] for a in assigned)
+            + ". Those are in effect; the search summary is missing."
+        )
     return report
 
 

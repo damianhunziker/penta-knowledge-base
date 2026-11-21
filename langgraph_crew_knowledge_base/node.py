@@ -427,7 +427,18 @@ class KnowledgeDiscoveryNode(NodeAgent):
             "error": report.get("error", ""),
         }
 
-        if report.get("error"):
+        if not status.get("ready"):
+            # A missing corpus explains everything else: the scout had nothing
+            # to search, so its failure (if any) is a symptom, not the cause.
+            summary = (
+                "Knowledge discovery found no corpus to search: "
+                f"{status.get('reason') or 'not indexed'}. "
+                "Continuing without additional knowledge. "
+                "Ingest documents with knowledge_base___ingest_from_root."
+            )
+            if report.get("error"):
+                summary += f" (the scout run also reported: {report['error']})"
+        elif report.get("error"):
             # The run itself failed — say that, not "completed with 0".
             summary = (
                 f"Knowledge discovery did not complete: {report['error']}. "
@@ -447,14 +458,6 @@ class KnowledgeDiscoveryNode(NodeAgent):
                     " Neither the corpus nor the web research produced a usable "
                     "source for this task — the books do not cover it."
                 )
-
-        else:
-            summary = (
-                "Knowledge discovery found no corpus to search: "
-                f"{status.get('reason') or 'not indexed'}. "
-                "Continuing without additional knowledge. "
-                "Ingest documents with knowledge_base___ingest_from_root."
-            )
 
         # Always visible: the node returning to the executor without a line was
         # indistinguishable from the routing being ignored.

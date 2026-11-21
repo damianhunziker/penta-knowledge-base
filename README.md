@@ -94,11 +94,20 @@ tags: [leverage-points]
 # Content...
 ```
 
-## Discovery workflow
+## Discovery
 
-1. **knowledge_scout** — searches existing corpus, recommends relevant titles
-2. **knowledge_researcher** — researches new PDFs, verifies licenses
-3. **knowledge_curator** — decides what to chunk, assigns to agents
+One step: **knowledge_scout** does both rounds in a single pass and returns one
+JSON report.
+
+1. **Round 1 — the corpus** it already has: several phrasings, German and
+   English, then the gap that remains.
+2. **Round 2 — the internet**, for exactly that gap, gated on a verified
+   licence.
+3. **Round 3 — install and assign**: `chunk_document` and `assign_to_agent` at
+   `project` (default), `client` or `custom`.
+
+The report (`round1_existing`, `round2_web`, `round3_installed`,
+`answer_for_worker`) is injected into the worker prompt.
 
 ## Agent assignment (YAML)
 

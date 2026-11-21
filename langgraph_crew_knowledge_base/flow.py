@@ -21,12 +21,10 @@ async def knowledge_discovery_handoff(state: Dict[str, Any]) -> Command:
     """
     Handoff node for knowledge discovery workflow.
     
-    Merges findings from:
-    - knowledge_scout (existing corpus)
-    - knowledge_researcher (new titles)
-    - knowledge_curator (chunking decisions, assignments)
-    
-    Returns one consolidated message for the worker.
+    Knowledge discovery is one step (``knowledge_scout``), which does the corpus
+    round, the web round and the install round in one pass. This handoff merges
+    whatever findings reach it into one message for the worker; it no longer
+    stitches together the three separate agents that used to exist.
     """
     findings_list = state.get("knowledge_discovery_findings", [])
     
