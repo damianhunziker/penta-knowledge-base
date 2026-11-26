@@ -14,10 +14,13 @@ This plugin owns the knowledge corpus (books, academic literature). Its rules ap
 - **Discovery is ONE scout, two rounds.** `knowledge_scout` searches the corpus, then researches the gap on the web, then installs and assigns — one pass, one JSON report. There is no separate researcher/curator stage; if you add one, it is a second place to keep in step.
 - **A discovery timeout keeps its work.** `KNOWLEDGE_DISCOVERY_TIMEOUT` (default 900 s) bounds the run. On timeout the report is rebuilt from the store, because chunking and assigning already happened — never report "failed" for a run that changed things.
 - **Injected blocks are tail-safe.** They go into `llm_input_messages` as a `runtime_reminder` HumanMessage, never into `messages` — they must not repeat in later turns.
-- **Grants carry a scope.** `project` (default) · `client` (one customer) · `deployment` (every customer). A run sees deployment ∪ its customer ∪ its project — narrow never leaks wide. `client`/`deployment` need `authorized_by="user"` + a note, otherwise ask the human.
-- **`grant_access` writes both halves**: the store row and the manifest at that level (merged, never replaced). `access_matrix` shows who may read what, and where.
-- **Managing what exists:** `scripts/knowledge_manager.py` (or `/knowledge` in the chat) browses bases, books, bindings and namespaces, and edits them. It is the same write path as the tools — never a second implementation.
-- **One ladder, two sources.** A binding comes from a manifest (`x-penta.knowledge_base`, versioned, inherited core → custom → plugin → client → project) or from the store (`assignment`, an override layer changed at runtime). The runtime merges them; `/knowledge agent <id>` shows both with a `source` per binding. Never treat the store as the only truth.
+- **Grants carry a scope.** `project` (default) · `client` (one customer) ·
+  `deployment` (every customer). A run sees deployment ∪ its customer ∪ its
+  project — narrow never leaks wide. `client`/`deployment` need
+  `authorized_by="user"` + a note, otherwise ask the human.
+- **Managing what exists** and the binding ladder (manifest vs store) are in the
+  skill: `scripts/knowledge_manager.py` / `/knowledge` is the same write path as
+  the tools, never a second implementation.
 - **`knowledge-raw:` holds the originals.** Every ingest copies the untouched PDF/EPUB/MD into a content-addressed store (`sha256`) *before* chunking, and each chunk carries `raw_ref`. Agents read it, never write it — classification is the knowledge layer's job. A citation uses `document_link.page_ref`; `available: false` means the file is gone and says so.
 - **Stale bindings are visible.** A grant to a book that left the corpus is not a book the agent can read. `/knowledge matrix` and `/knowledge agent <id>` mark them; `agent <id> prune` removes them.
 - **A base = a corpus.** An agent is given a base, not a chunk. A book whose chunks are frontmatter or bullets is marked `!` (a summary, not the book) and should not be bound.
